@@ -1,0 +1,104 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "clawbody"
+version = "0.1.0"
+description = "ClawBody - Give your OpenClaw AI agent a physical robot body with Reachy Mini. Voice conversation powered by OpenAI Realtime API with expressive movements."
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.11"
+authors = [
+    {name = "Tom", email = "tom@example.com"}
+]
+keywords = [
+    "clawbody",
+    "reachy-mini",
+    "openclaw",
+    "clawson",
+    "robotics",
+    "ai-assistant",
+    "openai-realtime",
+    "voice-conversation",
+    "expressive-robot",
+    "embodied-ai"
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Human Machine Interfaces",
+]
+dependencies = [
+    # OpenAI Realtime API
+    "openai>=1.50.0",
+    
+    # Audio streaming
+    "fastrtc>=0.0.17",
+    "numpy",
+    "scipy",
+    
+    # OpenClaw gateway client
+    "httpx>=0.27.0",
+    "httpx-sse>=0.4.0",
+    "websockets>=12.0",
+    
+    # Gradio UI
+    "gradio>=4.0.0",
+    
+    # Environment
+    "python-dotenv",
+]
+
+# Note: reachy-mini SDK must be installed separately from the robot or GitHub:
+# pip install git+https://github.com/pollen-robotics/reachy_mini.git
+# Or on the robot, it's pre-installed.
+
+[project.optional-dependencies]
+wireless = [
+    "pygobject",
+]
+vision = [
+    "opencv-python",
+    "ultralytics",
+]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "ruff",
+    "mypy",
+]
+
+[project.scripts]
+clawbody = "reachy_mini_openclaw.main:main"
+
+[project.entry-points."reachy_mini_apps"]
+clawbody = "reachy_mini_openclaw.main:ClawBodyApp"
+
+[project.urls]
+Homepage = "https://github.com/yourusername/clawbody"
+Documentation = "https://github.com/yourusername/clawbody#readme"
+Repository = "https://github.com/yourusername/clawbody"
+Issues = "https://github.com/yourusername/clawbody/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
