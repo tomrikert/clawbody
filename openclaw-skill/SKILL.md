@@ -1,6 +1,6 @@
 ---
 name: clawbody
-description: Give your OpenClaw AI agent a physical robot body with Reachy Mini. Voice conversation via OpenAI Realtime API, vision through camera, and expressive movements.
+description: Give your OpenClaw AI agent a physical robot body with Reachy Mini. Works with physical robot OR simulator! Voice conversation via OpenAI Realtime API, vision, and expressive movements.
 ---
 
 # ClawBody - Robot Body for OpenClaw
@@ -34,10 +34,15 @@ You speak → Reachy Mini 🎤
 
 ## Requirements
 
-### Hardware
+### Option A: Physical Robot
 - [Reachy Mini](https://github.com/pollen-robotics/reachy_mini) robot (Wireless or Lite)
 
-### Software
+### Option B: Simulator (No Hardware Required!)
+- Any computer with Python 3.11+
+- Install: `pip install "reachy-mini[mujoco]"`
+- [Simulator Setup Guide](https://huggingface.co/docs/reachy_mini/platforms/simulation/get_started)
+
+### Software (Both Options)
 - Python 3.11+
 - OpenAI API key with Realtime API access
 - OpenClaw gateway running on your network
@@ -67,6 +72,18 @@ OPENCLAW_TOKEN=your-gateway-token
 ```
 
 ## Usage
+
+### With Simulator (No Robot Required)
+
+```bash
+# Terminal 1: Start simulator
+reachy-mini-daemon --sim
+
+# Terminal 2: Run ClawBody
+clawbody --gradio
+```
+
+### With Physical Robot
 
 ```bash
 # Run ClawBody

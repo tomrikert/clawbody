@@ -23,6 +23,8 @@ tags:
  - multimodal
  - vision
  - expressive-robot
+ - simulation
+ - mujoco
 ---
 
 # 🦞🤖 ClawBody
@@ -34,6 +36,29 @@ ClawBody combines OpenClaw's AI intelligence with Reachy Mini's expressive robot
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 
+---
+
+## 🎮 No Robot? No Problem!
+
+**You don't need a physical Reachy Mini robot to use ClawBody!**
+
+ClawBody works with the [Reachy Mini Simulator](https://huggingface.co/docs/reachy_mini/platforms/simulation/get_started), a MuJoCo-based physics simulation that runs on your computer. Watch Clawson move and express emotions on screen while you talk to your OpenClaw agent.
+
+```bash
+# Install simulator support
+pip install "reachy-mini[mujoco]"
+
+# Start the simulator (opens a 3D window)
+reachy-mini-daemon --sim
+
+# In another terminal, run ClawBody
+clawbody --gradio
+```
+
+> 🍎 **Mac Users**: Use `mjpython -m reachy_mini.daemon.app.main --sim` instead.
+
+---
+
 ## ✨ Features
 
 - **🎤 Real-time Voice Conversation**: OpenAI Realtime API for sub-second response latency
@@ -41,6 +66,7 @@ ClawBody combines OpenClaw's AI intelligence with Reachy Mini's expressive robot
 - **👀 Vision**: See through the robot's camera and describe the environment
 - **💃 Expressive Movements**: Natural head movements, emotions, dances, and audio-driven wobble
 - **🦞 Clawson Embodied**: Your friendly space lobster AI assistant, now with a body!
+- **🖥️ Simulator Support**: Works with or without physical hardware
 
 ## 🏗️ Architecture
 
@@ -51,7 +77,7 @@ ClawBody combines OpenClaw's AI intelligence with Reachy Mini's expressive robot
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                    Reachy Mini Robot                             │
+│              Reachy Mini Robot (or Simulator)                    │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │
 │  │ Microphone  │  │   Camera    │  │   Movement System       │  │
 │  │  (input)    │  │  (vision)   │  │ (head, antennas, body)  │  │
@@ -86,10 +112,15 @@ ClawBody combines OpenClaw's AI intelligence with Reachy Mini's expressive robot
 
 ## 📋 Prerequisites
 
-### Hardware
+### Option A: With Physical Robot
 - [Reachy Mini](https://www.pollen-robotics.com/reachy-mini/) robot (Wireless or Lite)
 
-### Software
+### Option B: With Simulator (No Hardware Required!)
+- Any computer with Python 3.11+
+- Install: `pip install "reachy-mini[mujoco]"`
+- [Simulation Setup Guide](https://huggingface.co/docs/reachy_mini/platforms/simulation/get_started)
+
+### Software (Both Options)
 - Python 3.11+
 - [Reachy Mini SDK](https://github.com/pollen-robotics/reachy_mini) installed
 - [OpenClaw](https://github.com/openclaw/openclaw) gateway running
@@ -97,33 +128,44 @@ ClawBody combines OpenClaw's AI intelligence with Reachy Mini's expressive robot
 
 ## 🚀 Installation
 
-### On the Reachy Mini Robot
+### Quick Start with Simulator
 
 ```bash
-# SSH into the robot
-ssh pollen@reachy-mini.local
-
-# Clone the repository
-git clone https://github.com/yourusername/clawbody.git
-cd clawbody
-
-# Install in the apps virtual environment
-/venvs/apps_venv/bin/pip install -e .
-```
-
-### Using pip (Development)
-
-```bash
-# Clone the repository
-git clone https://github.com/yourusername/clawbody.git
+# Clone ClawBody
+git clone https://github.com/tomrikert/clawbody
 cd clawbody
 
 # Create virtual environment
 python -m venv .venv
 source .venv/bin/activate
 
-# Install
+# Install ClawBody + simulator support
 pip install -e .
+pip install "reachy-mini[mujoco]"
+
+# Configure (see Configuration section)
+cp .env.example .env
+# Edit .env with your keys
+
+# Terminal 1: Start the simulator
+reachy-mini-daemon --sim
+
+# Terminal 2: Run ClawBody
+clawbody --gradio
+```
+
+### On a Physical Reachy Mini Robot
+
+```bash
+# SSH into the robot
+ssh pollen@reachy-mini.local
+
+# Clone the repository
+git clone https://github.com/tomrikert/clawbody
+cd clawbody
+
+# Install in the apps virtual environment
+/venvs/apps_venv/bin/pip install -e .
 ```
 
 ## ⚙️ Configuration
@@ -141,7 +183,7 @@ cp .env.example .env
 OPENAI_API_KEY=sk-...your-key...
 
 # OpenClaw Gateway (required for AI responses)
-OPENCLAW_GATEWAY_URL=http://your-host-ip:18790
+OPENCLAW_GATEWAY_URL=http://localhost:18789  # or your host IP
 OPENCLAW_TOKEN=your-gateway-token
 OPENCLAW_AGENT_ID=main
 
@@ -151,7 +193,19 @@ OPENAI_VOICE=cedar
 
 ## 🎮 Usage
 
-### Console Mode
+### With Simulator
+
+```bash
+# Terminal 1: Start simulator
+reachy-mini-daemon --sim
+
+# Terminal 2: Run ClawBody with web UI (recommended for simulator)
+clawbody --gradio
+```
+
+The simulator opens a 3D window where you can watch the robot move. The Gradio web UI at http://localhost:7860 lets you interact via your browser's microphone.
+
+### With Physical Robot
 
 ```bash
 # Basic usage
@@ -163,19 +217,6 @@ clawbody --debug
 # With specific robot
 clawbody --robot-name my-reachy
 ```
-
-### Web UI Mode
-
-```bash
-# Launch Gradio interface
-clawbody --gradio
-```
-
-Then open http://localhost:7860 in your browser.
-
-### As a Reachy Mini App
-
-ClawBody registers as a Reachy Mini App, so you can launch it from the robot's dashboard after installation.
 
 ### CLI Options
 
@@ -201,6 +242,20 @@ ClawBody gives Clawson these physical abilities:
 | **Speak** | Voice output through the robot's speaker |
 | **Listen** | Hear through the robot's microphone |
 
+## 🖥️ Simulator Features
+
+When running with the simulator:
+
+- **3D Visualization**: Watch Clawson's movements in real-time
+- **Scene Options**: Use `--scene minimal` to add objects (apple, duck, croissant)
+- **Full SDK Compatibility**: The simulator behaves exactly like a real robot
+- **Dashboard Access**: Visit http://localhost:8000 to see the robot dashboard
+
+```bash
+# Start simulator with objects on a table
+reachy-mini-daemon --sim --scene minimal
+```
+
 ## 📄 License
 
 This project is licensed under the Apache 2.0 License - see the [LICENSE](LICENSE) file for details.
@@ -209,15 +264,16 @@ This project is licensed under the Apache 2.0 License - see the [LICENSE](LICENS
 
 ClawBody builds on:
 
-- [Pollen Robotics](https://www.pollen-robotics.com/) - Reachy Mini robot and SDK
+- [Pollen Robotics](https://www.pollen-robotics.com/) - Reachy Mini robot, SDK, and simulator
 - [OpenClaw](https://github.com/openclaw/openclaw) - AI assistant framework (Clawson!)
 - [OpenAI](https://openai.com/) - Realtime API for voice I/O
+- [MuJoCo](https://mujoco.org/) - Physics simulation engine
 - [pollen-robotics/reachy_mini_conversation_app](https://huggingface.co/spaces/pollen-robotics/reachy_mini_conversation_app) - Movement and audio systems
 
 ## 🤝 Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
 
-- **This project**: [GitHub Issues](https://github.com/yourusername/clawbody/issues)
+- **This project**: [GitHub Issues](https://github.com/tomrikert/clawbody/issues)
 - **OpenClaw Skills**: Submit ClawBody as a skill to [ClawHub](https://docs.openclaw.ai/tools/clawhub)
 - **Reachy Mini Apps**: Submit to [Pollen Robotics](https://github.com/pollen-robotics)

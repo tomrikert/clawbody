@@ -30,14 +30,14 @@
                 intelligent responses from OpenClaw, and expressive robot movements.
             </p>
             <div class="hero-actions">
-                <a href="#features" class="btn primary">Explore features</a>
-                <a href="#how-it-works" class="btn ghost">See how it works</a>
+                <a href="#simulator" class="btn primary">🖥️ Try with Simulator</a>
+                <a href="#features" class="btn ghost">See features</a>
             </div>
             <div class="hero-badges">
                 <span>🎙️ OpenAI Realtime</span>
                 <span>🦞 OpenClaw Gateway</span>
                 <span>💃 Expressive movement</span>
-                <span>👀 Vision</span>
+                <span>🖥️ No robot required!</span>
             </div>
         </div>
         <div class="hero-visual">
@@ -45,6 +45,7 @@
                 <div class="architecture-preview">
 <pre>
   You speak → Reachy Mini 🎤
+          (or Simulator 🖥️)
                   ↓
          OpenAI Realtime API
       (speech recognition + TTS)
@@ -55,9 +56,37 @@
      Robot speaks & moves 🤖💃
 </pre>
                 </div>
-                <p class="caption">Hybrid architecture: OpenAI for voice I/O, OpenClaw for intelligence.</p>
+                <p class="caption">Works with physical robot OR MuJoCo simulator!</p>
             </div>
         </div>
+    </div>
+</section>
+
+<section class="section simulator-callout" id="simulator">
+    <div class="story-card highlight">
+        <h2>🖥️ No Robot? No Problem!</h2>
+        <p class="story-text" style="font-size: 1.1rem;">
+            <strong>You don't need a physical Reachy Mini robot to use ClawBody!</strong><br><br>
+            ClawBody works with the Reachy Mini Simulator, a MuJoCo-based physics simulation 
+            that runs on your computer. Watch Clawson move and express emotions on screen 
+            while you talk to your OpenClaw agent.
+        </p>
+        <div class="architecture-preview" style="margin: 1.5rem 0;">
+<pre>
+# Install simulator support
+pip install "reachy-mini[mujoco]"
+
+# Start the simulator (opens 3D window)
+reachy-mini-daemon --sim
+
+# In another terminal, run ClawBody
+clawbody --gradio
+</pre>
+        </div>
+        <p class="caption">🍎 Mac Users: Use <code>mjpython -m reachy_mini.daemon.app.main --sim</code> instead</p>
+        <a href="https://huggingface.co/docs/reachy_mini/platforms/simulation/get_started" class="btn primary" style="margin-top: 1rem;" target="_blank">
+            📚 Simulator Setup Guide
+        </a>
     </div>
 </section>
 
@@ -90,9 +119,9 @@
             <p>Audio-driven head wobble, emotions, dances, and natural movements while speaking.</p>
         </div>
         <div class="feature-card">
-            <div class="icon">🎭</div>
-            <h3>Clawson embodied</h3>
-            <p>Your friendly space lobster AI assistant, now with a physical presence in the world.</p>
+            <div class="icon">🖥️</div>
+            <h3>Simulator support</h3>
+            <p>No robot? Run with MuJoCo simulator and watch Clawson move in a 3D window.</p>
         </div>
         <div class="feature-card">
             <div class="icon">⚡</div>
@@ -108,26 +137,25 @@
             <h3>How it works</h3>
             <p class="story-text">From speech to response in under a second</p>
             <ol class="story-list">
-                <li><span>🎤</span> Robot microphone captures your voice continuously.</li>
-                <li><span>🔇</span> Voice Activity Detection identifies when you stop speaking.</li>
-                <li><span>📝</span> OpenAI Realtime transcribes your speech instantly.</li>
-                <li><span>🦞</span> OpenClaw processes your message with full AI capabilities.</li>
-                <li><span>🔊</span> OpenAI Realtime speaks the response naturally.</li>
-                <li><span>🤖</span> Robot moves expressively while speaking.</li>
+                <li><span>🎤</span> Robot (or simulator) captures your voice</li>
+                <li><span>🔇</span> Voice Activity Detection identifies when you stop speaking</li>
+                <li><span>📝</span> OpenAI Realtime transcribes your speech instantly</li>
+                <li><span>🦞</span> OpenClaw processes your message with full AI capabilities</li>
+                <li><span>🔊</span> OpenAI Realtime speaks the response naturally</li>
+                <li><span>🤖</span> Robot moves expressively while speaking</li>
             </ol>
         </div>
         <div class="story-card secondary">
             <h3>Prerequisites</h3>
-            <p class="story-text">What you need to get started</p>
+            <p class="story-text">Choose your setup:</p>
             <div class="chips">
                 <span class="chip">🦞 OpenClaw Gateway</span>
                 <span class="chip">🔑 OpenAI API Key</span>
-                <span class="chip">🤖 Reachy Mini</span>
                 <span class="chip">🐍 Python 3.11+</span>
             </div>
             <p class="story-text" style="margin-top: 1rem;">
-                This app requires a running OpenClaw gateway on your network, 
-                an OpenAI API key with Realtime access, and a Reachy Mini robot.
+                <strong>Option A:</strong> 🤖 Physical Reachy Mini robot<br>
+                <strong>Option B:</strong> 🖥️ MuJoCo Simulator (free, no hardware!)
             </p>
             <a href="https://huggingface.co/spaces/tomrikert/clawbody/blob/main/README.md" class="btn ghost wide" style="margin-top: 1rem;">
                 View installation guide
@@ -139,25 +167,32 @@
 <section class="section">
     <div class="section-header">
         <h2>Quick start</h2>
-        <p class="intro">Get ClawBody running on your Reachy Mini</p>
+        <p class="intro">Get ClawBody running with the simulator</p>
     </div>
     <div class="story-card">
         <div class="architecture-preview">
 <pre>
-# SSH into your Reachy Mini
-ssh pollen@reachy-mini.local
-
-# Clone and install
-git clone https://huggingface.co/spaces/tomrikert/clawbody
+# Clone ClawBody
+git clone https://github.com/tomrikert/clawbody
 cd clawbody
-pip install -e .
 
-# Configure (edit with your OpenClaw gateway URL and OpenAI key)
+# Create virtual environment
+python -m venv .venv
+source .venv/bin/activate
+
+# Install ClawBody + simulator
+pip install -e .
+pip install "reachy-mini[mujoco]"
+
+# Configure (edit with your OpenClaw URL and OpenAI key)
 cp .env.example .env
 nano .env
 
-# Run ClawBody
-clawbody
+# Terminal 1: Start simulator
+reachy-mini-daemon --sim
+
+# Terminal 2: Run ClawBody
+clawbody --gradio
 </pre>
         </div>
     </div>
@@ -166,8 +201,10 @@ clawbody
 <footer class="footer">
     <p>
         ClawBody — giving OpenClaw a physical presence with Reachy Mini.<br>
-        Learn more about <a href="https://github.com/openclaw/openclaw">OpenClaw</a> and 
-        <a href="https://github.com/pollen-robotics/reachy_mini">Reachy Mini</a>.
+        <strong>Works with physical robot OR simulator!</strong><br><br>
+        Learn more about <a href="https://github.com/openclaw/openclaw">OpenClaw</a>, 
+        <a href="https://github.com/pollen-robotics/reachy_mini">Reachy Mini</a>, and
+        <a href="https://huggingface.co/docs/reachy_mini/platforms/simulation/get_started">the Simulator</a>.
     </p>
 </footer>
 
