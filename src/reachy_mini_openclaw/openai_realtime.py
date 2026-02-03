@@ -101,6 +101,9 @@ class OpenAIRealtimeHandler(AsyncStreamHandler):
         self.last_activity_time = 0.0
         self.start_time = 0.0
         self._processing_response = False
+        self._speaking = False  # True when robot is speaking (ignore mic input)
+        self._response_done_event = asyncio.Event()
+        self._response_done_event.set()  # Start with no active response
         
         # Pending transcript for OpenClaw
         self._pending_transcript: Optional[str] = None
@@ -194,6 +197,10 @@ class OpenAIRealtimeHandler(AsyncStreamHandler):
         
         # Speech detection
         if event_type == "input_audio_buffer.speech_started":
+            # Ignore if robot is speaking (echo/feedback)
+            if self._speaking:
+                logger.debug("Ignoring speech_started - robot is speaking")
+                return
             # User started speaking - clear any pending output
             while not self.output_queue.empty():
                 try:
@@ -211,6 +218,11 @@ class OpenAIRealtimeHandler(AsyncStreamHandler):
             
         # Transcription completed - this is when we send to OpenClaw
         if event_type == "conversation.item.input_audio_transcription.completed":
+            # Ignore transcripts while robot is speaking (echo)
+            if self._speaking:
+                logger.debug("Ignoring transcript while speaking: %s", event.transcript[:30] if event.transcript else "")
+                return
+                
             transcript = event.transcript
             if transcript and transcript.strip():
                 logger.info("User said: %s", transcript)
@@ -220,6 +232,7 @@ class OpenAIRealtimeHandler(AsyncStreamHandler):
                 # Cancel any OpenAI auto-response - we'll use OpenClaw instead
                 try:
                     await self.connection.response.cancel()
+                    await asyncio.sleep(0.1)  # Brief pause to let cancel complete
                 except Exception:
                     pass  # May fail if no response in progress
                 # Process through OpenClaw
@@ -249,6 +262,8 @@ class OpenAIRealtimeHandler(AsyncStreamHandler):
         # Response completed
         if event_type == "response.done":
             self._processing_response = False
+            self._speaking = False
+            self._response_done_event.set()  # Signal that response is complete
             if self.deps.head_wobbler is not None:
                 self.deps.head_wobbler.reset()
             
@@ -326,6 +341,21 @@ class OpenAIRealtimeHandler(AsyncStreamHandler):
             return
             
         try:
+            # Wait for any active response to complete (with timeout)
+            try:
+                await asyncio.wait_for(self._response_done_event.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning("Timeout waiting for previous response, canceling...")
+                try:
+                    await self.connection.response.cancel()
+                    await asyncio.sleep(0.2)
+                except Exception:
+                    pass
+            
+            # Mark that we're about to speak
+            self._speaking = True
+            self._response_done_event.clear()
+            
             # Create a response with explicit instructions to speak the text
             await self.connection.response.create(
                 response={
@@ -336,6 +366,8 @@ class OpenAIRealtimeHandler(AsyncStreamHandler):
             logger.debug("Requested TTS for: %s", text[:50])
         except Exception as e:
             logger.error("Failed to speak text: %s", e)
+            self._speaking = False
+            self._response_done_event.set()
             
     async def _execute_robot_actions(self, response_text: str) -> None:
         """Parse OpenClaw response for robot actions and execute them."""
