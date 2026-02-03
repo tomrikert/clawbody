@@ -152,13 +152,14 @@ class OpenAIRealtimeHandler(AsyncStreamHandler):
         logger.info("Connecting to OpenAI Realtime API with model: %s", model)
         
         async with self.client.beta.realtime.connect(model=model) as conn:
-            # Configure session for voice I/O only (NO auto-response)
-            # We handle all AI responses through OpenClaw, OpenAI is just for
-            # transcription (STT) and text-to-speech (TTS)
+            # Configure session for hybrid mode:
+            # - OpenAI handles STT (transcription) and TTS (speaking)
+            # - OpenClaw provides the AI intelligence
+            # - We cancel OpenAI's auto-response and substitute OpenClaw's response
             await conn.session.update(
                 session={
                     "modalities": ["text", "audio"],
-                    "instructions": "You are a text-to-speech system ONLY. Your ONLY job is to speak the text you are given. Do NOT generate your own responses. Do NOT add commentary. Do NOT answer questions. Just read what you're told to read.",
+                    "instructions": "Wait for instructions. Do not speak unless given specific text to read.",
                     "voice": get_session_voice(),
                     "input_audio_format": "pcm16",
                     "output_audio_format": "pcm16",
@@ -170,9 +171,10 @@ class OpenAIRealtimeHandler(AsyncStreamHandler):
                         "threshold": 0.5,
                         "prefix_padding_ms": 300,
                         "silence_duration_ms": 500,
-                        "create_response": False,  # CRITICAL: Don't auto-generate responses!
+                        # Allow auto-response to keep connection healthy
+                        # We'll cancel it and substitute OpenClaw's response
                     },
-                    "tools": [],  # No tools - OpenClaw handles everything
+                    "tools": [],
                     "tool_choice": "none",
                 },
             )
@@ -215,6 +217,11 @@ class OpenAIRealtimeHandler(AsyncStreamHandler):
                 await self.output_queue.put(
                     AdditionalOutputs({"role": "user", "content": transcript})
                 )
+                # Cancel any OpenAI auto-response - we'll use OpenClaw instead
+                try:
+                    await self.connection.response.cancel()
+                except Exception:
+                    pass  # May fail if no response in progress
                 # Process through OpenClaw
                 await self._process_with_openclaw(transcript)
             
@@ -315,29 +322,18 @@ class OpenAIRealtimeHandler(AsyncStreamHandler):
     async def _speak_text(self, text: str) -> None:
         """Have OpenAI TTS speak the given text."""
         if not self.connection:
+            logger.warning("No connection, cannot speak")
             return
             
         try:
-            # Add the text as an assistant message, then create audio response
-            # This ensures OpenAI just speaks the text without adding anything
-            await self.connection.conversation.item.create(
-                item={
-                    "type": "message",
-                    "role": "assistant",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": text,
-                        }
-                    ],
-                }
-            )
-            # Generate audio for the message we just added
+            # Create a response with explicit instructions to speak the text
             await self.connection.response.create(
                 response={
-                    "modalities": ["text", "audio"],  # Must include both
+                    "modalities": ["text", "audio"],
+                    "instructions": f"Read this text aloud naturally: {text}",
                 }
             )
+            logger.debug("Requested TTS for: %s", text[:50])
         except Exception as e:
             logger.error("Failed to speak text: %s", e)
             
