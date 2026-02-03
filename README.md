@@ -5,7 +5,7 @@ colorFrom: red
 colorTo: purple
 sdk: static
 pinned: false
-short_description: Give your OpenClaw AI a physical robot body
+short_description: OpenClaw AI with robot body and face tracking
 tags:
  - reachy_mini
  - reachy_mini_python_app
@@ -25,6 +25,10 @@ tags:
  - expressive-robot
  - simulation
  - mujoco
+ - face-tracking
+ - face-detection
+ - eye-contact
+ - human-robot-interaction
 ---
 
 # 🦞🤖 ClawBody
@@ -35,6 +39,31 @@ ClawBody combines OpenClaw's AI intelligence with Reachy Mini's expressive robot
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+
+---
+
+## 👁️ NEW: Face Tracking & Eye Contact
+
+**The robot looks at you when you speak!**
+
+ClawBody now includes real-time face tracking that makes conversations feel natural and engaging:
+
+- **Automatic Face Detection**: Uses MediaPipe or YOLO to detect faces at 25Hz
+- **Smooth Head Tracking**: Robot smoothly follows your face as you move
+- **Natural Eye Contact**: Maintains engagement during conversation
+- **Graceful Fallback**: Smoothly returns to neutral position when you leave
+
+```bash
+# Face tracking is enabled by default
+clawbody
+
+# Choose your tracker (MediaPipe is lighter, YOLO is more accurate)
+clawbody --head-tracker mediapipe
+clawbody --head-tracker yolo
+
+# Disable if needed
+clawbody --no-face-tracking
+```
 
 ---
 
@@ -61,6 +90,7 @@ clawbody --gradio
 
 ## ✨ Features
 
+- **👁️ Face Tracking**: Robot tracks your face and maintains eye contact during conversation
 - **🎤 Real-time Voice Conversation**: OpenAI Realtime API for sub-second response latency
 - **🧠 OpenClaw Intelligence**: Your responses come from OpenClaw with full tool access
 - **👀 Vision**: See through the robot's camera and describe the environment
@@ -139,9 +169,12 @@ cd clawbody
 python -m venv .venv
 source .venv/bin/activate
 
-# Install ClawBody + simulator support
-pip install -e .
+# Install ClawBody + simulator support + face tracking
+pip install -e ".[mediapipe_vision]"
 pip install "reachy-mini[mujoco]"
+
+# Or for more accurate face tracking (requires more resources)
+# pip install -e ".[yolo_vision]"
 
 # Configure (see Configuration section)
 cp .env.example .env
@@ -189,6 +222,10 @@ OPENCLAW_AGENT_ID=main
 
 # Optional - Customize voice
 OPENAI_VOICE=cedar
+
+# Optional - Face tracking (enabled by default)
+ENABLE_FACE_TRACKING=true
+HEAD_TRACKER_TYPE=mediapipe  # or "yolo" for more accuracy
 ```
 
 ## 🎮 Usage
@@ -228,6 +265,8 @@ clawbody --robot-name my-reachy
 | `--gateway-url URL` | OpenClaw gateway URL |
 | `--no-camera` | Disable camera functionality |
 | `--no-openclaw` | Disable OpenClaw integration |
+| `--head-tracker TYPE` | Face tracker: `mediapipe` (lighter) or `yolo` (more accurate) |
+| `--no-face-tracking` | Disable face tracking |
 
 ## 🛠️ Robot Capabilities
 
@@ -235,6 +274,7 @@ ClawBody gives Clawson these physical abilities:
 
 | Capability | Description |
 |------------|-------------|
+| **Face Tracking** | Automatically tracks and looks at people during conversation |
 | **Look** | Move head to look in directions (left, right, up, down) |
 | **See** | Capture images through the robot's camera |
 | **Dance** | Perform expressive dance animations |
