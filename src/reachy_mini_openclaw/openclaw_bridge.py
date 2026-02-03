@@ -68,10 +68,9 @@ class OpenClawBridge:
         self.agent_id = agent_id or os.getenv("OPENCLAW_AGENT_ID") or config.OPENCLAW_AGENT_ID
         self.timeout = timeout
         
-        # Session state - use the same user ID as other channels (WhatsApp, web, etc.)
-        # This allows the robot to share conversation context across all channels.
-        # Set OPENCLAW_USER_ID in .env to match your WhatsApp user ID.
-        self.session_user = os.getenv("OPENCLAW_USER_ID") or config.OPENCLAW_USER_ID or "tom"
+        # Session key - use "main" to share context with WhatsApp and other channels
+        # The full session key is: agent:<agent_id>:<session_key>
+        self.session_key = os.getenv("OPENCLAW_SESSION_KEY") or config.OPENCLAW_SESSION_KEY or "main"
         
         # Connection state
         self._connected = False
@@ -95,7 +94,6 @@ class OpenClawBridge:
                     json={
                         "model": f"openclaw:{self.agent_id}",
                         "messages": [{"role": "user", "content": "ping"}],
-                        "user": self.session_user,
                     },
                     headers=self._get_headers(),
                 )
@@ -118,6 +116,9 @@ class OpenClawBridge:
         """Get headers for OpenClaw API requests."""
         headers = {
             "Content-Type": "application/json",
+            # Use session key header to share context with WhatsApp and other channels
+            # Format: agent:<agent_id>:<session_key> - default "main" shares with all DMs
+            "x-openclaw-session-key": f"agent:{self.agent_id}:{self.session_key}",
         }
         if self.gateway_token:
             headers["Authorization"] = f"Bearer {self.gateway_token}"
@@ -170,7 +171,6 @@ class OpenClawBridge:
                     json={
                         "model": f"openclaw:{self.agent_id}",
                         "messages": request_messages,
-                        "user": self.session_user,
                         "stream": False,
                     },
                     headers=self._get_headers(),
@@ -229,7 +229,6 @@ class OpenClawBridge:
                     json={
                         "model": f"openclaw:{self.agent_id}",
                         "messages": request_messages,
-                        "user": self.session_user,
                         "stream": True,
                     },
                     headers=self._get_headers(),

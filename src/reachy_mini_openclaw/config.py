@@ -28,9 +28,9 @@ class Config:
     OPENCLAW_GATEWAY_URL: str = field(default_factory=lambda: os.getenv("OPENCLAW_GATEWAY_URL", "http://localhost:18789"))
     OPENCLAW_TOKEN: Optional[str] = field(default_factory=lambda: os.getenv("OPENCLAW_TOKEN"))
     OPENCLAW_AGENT_ID: str = field(default_factory=lambda: os.getenv("OPENCLAW_AGENT_ID", "main"))
-    # User ID for OpenClaw session - set this to match your WhatsApp/other channel user ID
-    # to share conversation context across channels
-    OPENCLAW_USER_ID: str = field(default_factory=lambda: os.getenv("OPENCLAW_USER_ID", "tom"))
+    # Session key for OpenClaw - uses "main" to share context with WhatsApp and other channels
+    # Format: agent:<agent_id>:<session_key>, but we only need the session key part here
+    OPENCLAW_SESSION_KEY: str = field(default_factory=lambda: os.getenv("OPENCLAW_SESSION_KEY", "main"))
     
     # Robot Configuration
     ROBOT_NAME: Optional[str] = field(default_factory=lambda: os.getenv("ROBOT_NAME"))
