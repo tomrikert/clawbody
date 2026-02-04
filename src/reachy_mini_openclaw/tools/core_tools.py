@@ -36,6 +36,7 @@ class ToolDependencies:
     robot: Any  # ReachyMini instance
     camera_worker: Optional[Any] = None
     openclaw_bridge: Optional["OpenClawBridge"] = None
+    vision_manager: Optional[Any] = None  # Local vision processor (SmolVLM2)
 
 
 # Tool specifications in OpenAI format
@@ -211,12 +212,12 @@ async def _handle_look(args: dict, deps: ToolDependencies) -> dict:
 
 
 async def _handle_camera(args: dict, deps: ToolDependencies) -> dict:
-    """Handle the camera tool - capture image and get description from OpenClaw.
+    """Handle the camera tool - capture image and get description.
     
-    Since OpenAI Realtime doesn't have vision, we send the image to OpenClaw
-    for analysis and return the description.
+    Uses local vision (SmolVLM2) if available, otherwise falls back to OpenClaw.
     """
-    logger.info("Camera tool called, camera_worker=%s", deps.camera_worker is not None)
+    logger.info("Camera tool called, camera_worker=%s, vision_manager=%s", 
+                deps.camera_worker is not None, deps.vision_manager is not None)
     
     if deps.camera_worker is None:
         logger.warning("Camera worker is None")
@@ -239,16 +240,31 @@ async def _handle_camera(args: dict, deps: ToolDependencies) -> dict:
         if frame is None:
             return {"error": "No frame available from camera"}
         
-        # Encode frame as JPEG base64
-        import cv2
-        logger.info("Encoding frame, shape=%s", frame.shape)
-        _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-        b64_image = base64.b64encode(buffer).decode('utf-8')
-        logger.info("Frame encoded, size=%d bytes", len(b64_image))
+        logger.info("Got frame, shape=%s", frame.shape)
         
-        # Send to OpenClaw for vision analysis (OpenAI Realtime doesn't have vision)
+        # Option 1: Use local vision processor (SmolVLM2) if available
+        if deps.vision_manager is not None:
+            logger.info("Using local vision processor (SmolVLM2)...")
+            description = deps.vision_manager.process_now(
+                "Describe what you see in this image. Be specific about people, objects, and the environment. Keep it concise (2-3 sentences)."
+            )
+            if description and not description.startswith(("Vision", "Failed", "Error", "GPU", "No camera")):
+                logger.info("Local vision response: %s", description[:100])
+                return {
+                    "status": "success",
+                    "description": description,
+                    "source": "local_vision"
+                }
+            else:
+                logger.warning("Local vision failed: %s", description)
+        
+        # Option 2: Fall back to OpenClaw for vision analysis
         if deps.openclaw_bridge is not None and deps.openclaw_bridge.is_connected:
-            logger.info("Sending image to OpenClaw for vision analysis...")
+            logger.info("Using OpenClaw for vision analysis...")
+            import cv2
+            _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            b64_image = base64.b64encode(buffer).decode('utf-8')
+            
             response = await deps.openclaw_bridge.chat(
                 "Describe what you see in this image. Be specific about people, objects, and the environment. Keep it concise (2-3 sentences).",
                 image_b64=b64_image,
@@ -259,14 +275,15 @@ async def _handle_camera(args: dict, deps: ToolDependencies) -> dict:
                 return {
                     "status": "success",
                     "description": response.content,
+                    "source": "openclaw"
                 }
             else:
                 logger.warning("OpenClaw vision failed: %s", response.error)
         
-        # Fallback if OpenClaw not available
+        # Fallback if neither is available
         return {
-            "status": "success",
-            "description": "I captured an image but couldn't analyze it. My vision system needs OpenClaw to process what I see."
+            "status": "partial",
+            "description": "I captured an image but couldn't analyze it. No vision processing available."
         }
     except Exception as e:
         logger.error("Camera tool error: %s", e, exc_info=True)
@@ -281,11 +298,12 @@ async def _handle_face_tracking(args: dict, deps: ToolDependencies) -> dict:
         return {"error": "Camera not available for face tracking"}
     
     try:
-        if hasattr(deps.camera_worker, 'set_face_tracking'):
-            deps.camera_worker.set_face_tracking(enabled)
-            return {"status": "success", "face_tracking": enabled}
-        else:
-            return {"error": "Face tracking not supported"}
+        # Check if head tracker is available
+        if deps.camera_worker.head_tracker is None:
+            return {"error": "Face tracking not available - no head tracker initialized"}
+        
+        deps.camera_worker.set_head_tracking_enabled(enabled)
+        return {"status": "success", "face_tracking": enabled}
     except Exception as e:
         return {"error": str(e)}
 

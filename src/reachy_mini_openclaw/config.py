@@ -42,7 +42,13 @@ class Config:
     
     # Face Tracking Configuration
     # Options: "yolo", "mediapipe", or None for auto-detect
-    HEAD_TRACKER_TYPE: Optional[str] = field(default_factory=lambda: os.getenv("HEAD_TRACKER_TYPE"))
+    HEAD_TRACKER_TYPE: Optional[str] = field(default_factory=lambda: os.getenv("HEAD_TRACKER_TYPE", "yolo"))
+    
+    # Local Vision Processing
+    ENABLE_LOCAL_VISION: bool = field(default_factory=lambda: os.getenv("ENABLE_LOCAL_VISION", "false").lower() == "true")
+    LOCAL_VISION_MODEL: str = field(default_factory=lambda: os.getenv("LOCAL_VISION_MODEL", "HuggingFaceTB/SmolVLM2-256M-Video-Instruct"))
+    VISION_DEVICE: str = field(default_factory=lambda: os.getenv("VISION_DEVICE", "auto"))  # "auto", "cuda", "mps", "cpu"
+    HF_HOME: str = field(default_factory=lambda: os.getenv("HF_HOME", os.path.expanduser("~/.cache/huggingface")))
     
     # Custom Profile (for personality customization)
     CUSTOM_PROFILE: Optional[str] = field(default_factory=lambda: os.getenv("REACHY_MINI_CUSTOM_PROFILE"))
@@ -64,3 +70,15 @@ def set_custom_profile(profile: Optional[str]) -> None:
     global config
     config.CUSTOM_PROFILE = profile
     os.environ["REACHY_MINI_CUSTOM_PROFILE"] = profile or ""
+
+
+def set_face_tracking_enabled(enabled: bool) -> None:
+    """Enable or disable face tracking at runtime."""
+    global config
+    config.ENABLE_FACE_TRACKING = enabled
+
+
+def set_local_vision_enabled(enabled: bool) -> None:
+    """Enable or disable local vision processing at runtime."""
+    global config
+    config.ENABLE_LOCAL_VISION = enabled

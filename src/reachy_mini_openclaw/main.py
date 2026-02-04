@@ -112,6 +112,16 @@ Examples:
         help="Disable OpenClaw integration"
     )
     parser.add_argument(
+        "--no-face-tracking",
+        action="store_true",
+        help="Disable face tracking"
+    )
+    parser.add_argument(
+        "--local-vision",
+        action="store_true",
+        help="Enable local vision processing with SmolVLM2"
+    )
+    parser.add_argument(
         "--profile",
         type=str,
         help="Custom personality profile to use"
@@ -208,16 +218,29 @@ class ClawBodyCore:
         
         # Camera worker for video streaming and frame capture
         self.camera_worker = None
+        self.head_tracker = None
+        self.vision_manager = None
+        
         if enable_camera:
             logger.info("Initializing camera worker...")
             from reachy_mini_openclaw.camera_worker import CameraWorker
-            # Initialize without face tracking (face tracking is optional)
+            
+            # Initialize head tracker for local face tracking
+            if config.ENABLE_FACE_TRACKING:
+                self.head_tracker = self._initialize_head_tracker(config.HEAD_TRACKER_TYPE)
+            
+            # Initialize camera worker with head tracker
             self.camera_worker = CameraWorker(
                 reachy_mini=self.robot,
-                head_tracker=None,  # No face tracking by default
+                head_tracker=self.head_tracker,
             )
-            # Disable head tracking since we don't have a tracker
-            self.camera_worker.set_head_tracking_enabled(False)
+            
+            # Enable/disable head tracking based on whether we have a tracker
+            self.camera_worker.set_head_tracking_enabled(self.head_tracker is not None)
+            
+            # Initialize local vision processor if enabled
+            if config.ENABLE_LOCAL_VISION:
+                self.vision_manager = self._initialize_vision_manager()
         
         # Create tool dependencies
         self.deps = ToolDependencies(
@@ -226,6 +249,7 @@ class ClawBodyCore:
             robot=self.robot,
             camera_worker=self.camera_worker,
             openclaw_bridge=self.openclaw_bridge,
+            vision_manager=self.vision_manager,
         )
         
         # Initialize OpenAI Realtime handler with OpenClaw bridge
@@ -237,6 +261,88 @@ class ClawBodyCore:
         # State
         self._stop_event = asyncio.Event()
         self._tasks: list[asyncio.Task] = []
+        
+    def _initialize_vision_manager(self) -> Optional[Any]:
+        """Initialize local vision processor (SmolVLM2).
+        
+        Returns:
+            VisionManager instance or None if initialization fails
+        """
+        if self.camera_worker is None:
+            logger.warning("Cannot initialize vision manager without camera worker")
+            return None
+        
+        try:
+            from reachy_mini_openclaw.vision.processors import (
+                VisionConfig, 
+                initialize_vision_manager,
+            )
+            from reachy_mini_openclaw.config import config
+            
+            vision_config = VisionConfig(
+                model_path=config.LOCAL_VISION_MODEL,
+                device_preference=config.VISION_DEVICE,
+                hf_home=config.HF_HOME,
+            )
+            
+            logger.info("Initializing local vision processor (SmolVLM2)...")
+            vision_manager = initialize_vision_manager(self.camera_worker, vision_config)
+            
+            if vision_manager is not None:
+                logger.info("Local vision processor initialized")
+            else:
+                logger.warning("Local vision processor failed to initialize")
+            
+            return vision_manager
+            
+        except ImportError as e:
+            logger.warning(f"Local vision not available: {e}")
+            logger.warning("Install with: pip install torch transformers")
+            return None
+        except Exception as e:
+            logger.error(f"Failed to initialize vision manager: {e}")
+            return None
+    
+    def _initialize_head_tracker(self, tracker_type: Optional[str] = None) -> Optional[Any]:
+        """Initialize head tracker for local face tracking.
+        
+        Args:
+            tracker_type: Type of tracker ("yolo", "mediapipe", or None for auto)
+            
+        Returns:
+            Initialized head tracker or None if initialization fails
+        """
+        # Default to YOLO if not specified
+        if tracker_type is None:
+            tracker_type = "yolo"
+        
+        if tracker_type == "yolo":
+            try:
+                from reachy_mini_openclaw.vision.yolo_head_tracker import HeadTracker
+                logger.info("Initializing YOLO face tracker...")
+                tracker = HeadTracker(device="cpu")  # CPU is fast enough for face detection
+                logger.info("YOLO face tracker initialized")
+                return tracker
+            except ImportError as e:
+                logger.warning(f"YOLO tracker not available: {e}")
+                logger.warning("Install with: pip install ultralytics supervision")
+            except Exception as e:
+                logger.error(f"Failed to initialize YOLO tracker: {e}")
+        
+        elif tracker_type == "mediapipe":
+            try:
+                from reachy_mini_openclaw.vision.mediapipe_tracker import HeadTracker
+                logger.info("Initializing MediaPipe face tracker...")
+                tracker = HeadTracker()
+                logger.info("MediaPipe face tracker initialized")
+                return tracker
+            except ImportError as e:
+                logger.warning(f"MediaPipe tracker not available: {e}")
+            except Exception as e:
+                logger.error(f"Failed to initialize MediaPipe tracker: {e}")
+        
+        logger.warning("No face tracker available - face tracking disabled")
+        return None
         
     def _should_stop(self) -> bool:
         """Check if we should stop."""
@@ -305,6 +411,11 @@ class ClawBodyCore:
             logger.info("Starting camera worker...")
             self.camera_worker.start()
         
+        # Start local vision processor if available
+        if self.vision_manager is not None:
+            logger.info("Starting local vision processor...")
+            self.vision_manager.start()
+        
         # Start audio
         logger.info("Starting audio...")
         self.robot.media.start_recording()
@@ -341,6 +452,10 @@ class ClawBodyCore:
         # Stop movement system
         self.head_wobbler.stop()
         self.movement_manager.stop()
+        
+        # Stop vision manager
+        if self.vision_manager is not None:
+            self.vision_manager.stop()
         
         # Stop camera worker
         if self.camera_worker is not None:
@@ -403,6 +518,16 @@ def main() -> None:
     if args.profile:
         from reachy_mini_openclaw.config import set_custom_profile
         set_custom_profile(args.profile)
+    
+    # Configure face tracking and local vision from args
+    from reachy_mini_openclaw.config import (
+        set_face_tracking_enabled, 
+        set_local_vision_enabled,
+    )
+    if args.no_face_tracking:
+        set_face_tracking_enabled(False)
+    if args.local_vision:
+        set_local_vision_enabled(True)
     
     if args.gradio:
         # Launch Gradio UI
