@@ -85,14 +85,13 @@ TOOL_SPECS = [
     {
         "type": "function",
         "name": "dance",
-        "description": "Perform a dance animation. Use this to express joy, celebrate, or entertain.",
+        "description": "Perform a dance animation. Accepts any string; available dances depend on installed libraries. Falls back to macro movements if missing.",
         "parameters": {
             "type": "object",
             "properties": {
                 "dance_name": {
                     "type": "string",
-                    "enum": ["happy", "excited", "wave", "nod", "shake", "bounce"],
-                    "description": "The dance to perform"
+                    "description": "Dance name (e.g., happy, excited, wave, nod, shake, bounce)."
                 }
             },
             "required": ["dance_name"]
@@ -101,17 +100,26 @@ TOOL_SPECS = [
     {
         "type": "function",
         "name": "emotion",
-        "description": "Express an emotion through movement. Use this to show reactions and feelings.",
+        "description": "Express an emotion through movement. Accepts any string; available emotions depend on installed libraries. Falls back to macro movements if missing.",
         "parameters": {
             "type": "object",
             "properties": {
                 "emotion_name": {
                     "type": "string",
-                    "enum": ["happy", "sad", "surprised", "curious", "thinking", "confused", "excited"],
-                    "description": "The emotion to express"
+                    "description": "Emotion name (e.g., happy, sad, surprised, curious, thinking, confused, excited)."
                 }
             },
             "required": ["emotion_name"]
+        }
+    },
+    {
+        "type": "function",
+        "name": "capabilities",
+        "description": "List available dances/emotions detected at runtime (and macro fallbacks). Useful for debugging and UIs.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": []
         }
     },
     {
@@ -172,6 +180,7 @@ async def dispatch_tool_call(
         "face_tracking": _handle_face_tracking,
         "dance": _handle_dance,
         "emotion": _handle_emotion,
+        "capabilities": _handle_capabilities,
         "stop_moves": _handle_stop_moves,
         "idle": _handle_idle,
     }
@@ -309,36 +318,44 @@ async def _handle_face_tracking(args: dict, deps: ToolDependencies) -> dict:
 
 
 async def _handle_dance(args: dict, deps: ToolDependencies) -> dict:
-    """Handle dance tool."""
+    """Handle dance tool.
+
+    If reachy_mini_dances_library is installed, use its dances.
+    Otherwise fall back to macro movements (emotion handler).
+    """
+    from reachy_mini_openclaw.capabilities.registry import get_dance_factory
+
     dance_name = args.get("dance_name", "happy")
-    
+
     try:
-        # Try to use dance library if available
-        from reachy_mini_dances_library import dances
-        
-        if hasattr(dances, dance_name):
-            dance_class = getattr(dances, dance_name)
-            dance_move = dance_class()
+        factory = get_dance_factory(dance_name)
+        if factory is not None:
+            dance_move = factory()
             deps.movement_manager.queue_move(dance_move)
-            return {"status": "success", "dance": dance_name}
-        else:
-            # Fallback to simple head movement
-            return await _handle_emotion({"emotion_name": dance_name}, deps)
-    except ImportError:
-        # No dance library, use emotion as fallback
-        return await _handle_emotion({"emotion_name": dance_name}, deps)
+            return {"status": "success", "dance": dance_name, "source": "dance_library"}
+
+        # Fallback to simple head movement macros
+        result = await _handle_emotion({"emotion_name": dance_name}, deps)
+        result.setdefault("source", "macro_fallback")
+        result.setdefault("dance", dance_name)
+        return result
     except Exception as e:
         return {"error": str(e)}
 
 
 async def _handle_emotion(args: dict, deps: ToolDependencies) -> dict:
-    """Handle emotion expression."""
+    """Handle emotion expression.
+
+    Currently implemented as macro head-movement sequences.
+    If a future Reachy Mini SDK exposes emotion primitives, this is
+    the place to route to them.
+    """
     from reachy_mini_openclaw.moves import HeadLookMove
-    
+
     emotion_name = args.get("emotion_name", "happy")
-    
-    # Map emotions to simple head movements
-    emotion_sequences = {
+
+    # Map emotions to simple head movements (macro fallback)
+    emotion_sequences: dict[str, list[str]] = {
         "happy": ["up", "front"],
         "sad": ["down"],
         "surprised": ["up", "front"],
@@ -346,15 +363,20 @@ async def _handle_emotion(args: dict, deps: ToolDependencies) -> dict:
         "thinking": ["up", "left"],
         "confused": ["left", "right", "front"],
         "excited": ["up", "down", "up", "front"],
+        # Common aliases / gestures
+        "wave": ["right", "front"],
+        "nod": ["down", "up", "front"],
+        "shake": ["left", "right", "left", "front"],
+        "bounce": ["down", "front"],
     }
-    
+
     sequence = emotion_sequences.get(emotion_name, ["front"])
-    
+
     try:
         for direction in sequence:
             _, current_ant = deps.robot.get_current_joint_positions()
             current_head = deps.robot.get_current_head_pose()
-            
+
             move = HeadLookMove(
                 direction=direction,
                 start_pose=current_head,
@@ -362,10 +384,44 @@ async def _handle_emotion(args: dict, deps: ToolDependencies) -> dict:
                 duration=0.5,
             )
             deps.movement_manager.queue_move(move)
-        
-        return {"status": "success", "emotion": emotion_name}
+
+        return {
+            "status": "success",
+            "emotion": emotion_name,
+            "source": "macro",
+            "known": emotion_name in emotion_sequences,
+        }
     except Exception as e:
         return {"error": str(e)}
+
+
+async def _handle_capabilities(args: dict, deps: ToolDependencies) -> dict:
+    """Return a runtime report of available dances/emotions."""
+    from reachy_mini_openclaw.capabilities.registry import capabilities_report
+
+    macro_emotions = [
+        "happy",
+        "sad",
+        "surprised",
+        "curious",
+        "thinking",
+        "confused",
+        "excited",
+        "wave",
+        "nod",
+        "shake",
+        "bounce",
+    ]
+
+    report = capabilities_report(macro_emotions=macro_emotions, macro_dances=["wave", "nod", "shake", "bounce"])
+    return {
+        "status": "success",
+        "dances_available": report.dances_available,
+        "dance_names": report.dance_names,
+        "emotions_available": report.emotions_available,
+        "emotion_names": report.emotion_names,
+        "notes": report.notes,
+    }
 
 
 async def _handle_stop_moves(args: dict, deps: ToolDependencies) -> dict:
