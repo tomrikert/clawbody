@@ -552,6 +552,52 @@ OpenClaw has access to many capabilities you don't have directly.""",
                 self._gesture_last_t = now
                 return
 
+
+        # 4) Explicit stage directions (when user says the word)
+        # These are common in Mandarin prompts: "點頭"/"搖頭"/"彈跳"/"搖擺".
+        if True:
+            hit = contains_any(tail, ["搖頭", "點頭", "彈跳", "跳起來", "搖擺", "搖晃", "左右搖", "擺動"])
+            if hit:
+                idx = buf.rfind(hit)
+                if "搖頭" in hit:
+                    await self._schedule_gesture_at_char(
+                        "dir_shake",
+                        idx,
+                        ["left", "right", "left", "right", "left", "front"],
+                        [0.22, 0.22, 0.22, 0.22, 0.22, 0.35],
+                    )
+                    self._gesture_last_t = now
+                    return
+                if "點頭" in hit:
+                    await self._schedule_gesture_at_char(
+                        "dir_nod",
+                        idx,
+                        ["down", "up", "down", "up", "front"],
+                        [0.22, 0.22, 0.22, 0.22, 0.40],
+                    )
+                    self._gesture_last_t = now
+                    return
+                if hit in ["彈跳", "跳起來"]:
+                    await self._schedule_gesture_at_char(
+                        "dir_bounce",
+                        idx,
+                        ["down", "up", "down", "front"],
+                        [0.20, 0.20, 0.20, 0.35],
+                    )
+                    self._gesture_last_t = now
+                    return
+                # body sway is a tool, but our scheduler currently queues headlook.
+                # We approximate with a head sway for now; body_sway can be invoked explicitly by user.
+                if hit in ["搖擺", "搖晃", "左右搖", "擺動"]:
+                    await self._schedule_gesture_at_char(
+                        "dir_sway",
+                        idx,
+                        ["right", "left", "right", "front"],
+                        [0.22, 0.22, 0.22, 0.45],
+                    )
+                    self._gesture_last_t = now
+                    return
+
         # 4) Question -> tilt-ish (gentle side glance)
         if (not self._gesture_fired["q"]):
             # Trigger at the most recent question marker.
