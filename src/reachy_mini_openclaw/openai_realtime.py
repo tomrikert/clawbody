@@ -17,6 +17,7 @@ import base64
 import random
 import asyncio
 import logging
+import os
 from typing import Any, Final, Literal, Optional, Tuple
 from datetime import datetime
 
@@ -37,6 +38,14 @@ logger = logging.getLogger(__name__)
 OPENAI_SAMPLE_RATE: Final[Literal[24000]] = 24000
 
 # Base instructions for the robot body capabilities
+
+# Gesture mode
+# - natural: trigger a small, turn-level gesture at the start of each assistant response
+# - precise: attempt transcript-aligned gestures during speech
+GESTURE_MODE = os.getenv("CLAWBODY_GESTURE_MODE", "natural").strip().lower()
+# Optional timing bias (seconds) for scheduled gestures
+GESTURE_BIAS_S = float(os.getenv("CLAWBODY_GESTURE_BIAS_S", "0.0") or 0.0)
+
 ROBOT_BODY_INSTRUCTIONS = """
 ## Your Robot Body (Reachy Mini)
 You are currently embodied in a Reachy Mini robot. You have physical capabilities:
@@ -306,6 +315,11 @@ OpenClaw has access to many capabilities you don't have directly.""",
             self._transcript_total_chars = 0
             self._pending_gestures = {}
             logger.debug("Response started")
+            if GESTURE_MODE == "natural":
+                try:
+                    await self._trigger_turn_gesture(self._last_user_message)
+                except Exception:
+                    pass
             
         # Audio output from TTS
         if event_type == "response.audio.delta":
@@ -468,6 +482,44 @@ OpenClaw has access to many capabilities you don't have directly.""",
             logger.error("OpenClaw query failed: %s", e)
             return {"error": str(e)}
             
+
+    async def _trigger_turn_gesture(self, user_text: str | None) -> None:
+        """Trigger a small, natural gesture at the start of a response.
+
+        Turn-level (not word-aligned): should feel conversational.
+        """
+        if not user_text:
+            return
+        t = str(user_text)
+
+        # Greetings -> friendly wave-ish
+        if any(k.lower() in t.lower() for k in ["哈囉", "你好", "嗨", "hello", "hi", "안녕"]):
+            await self._queue_headlook_sequence(["right", "left", "front"], [0.22, 0.22, 0.45])
+            return
+
+        # Weather -> look up
+        if any(k in t for k in ["天氣", "下雨", "溫度", "幾度", "氣象", "晴", "陰", "風"]):
+            await self._queue_headlook_sequence(["up", "front"], [0.35, 0.65])
+            return
+
+        # News/accidents -> look down (serious)
+        if any(k in t for k in ["新聞", "車禍", "死亡", "受傷", "意外", "災", "地震", "火災"]):
+            await self._queue_headlook_sequence(["down", "front"], [0.45, 0.75])
+            return
+
+        # Yes/no questions -> curious glance
+        if ("?" in t) or ("？" in t) or t.strip().endswith(("嗎", "呢")) or any(k in t for k in ["是不是", "會不會", "可不可以"]):
+            await self._queue_headlook_sequence(["right", "front"], [0.30, 0.55])
+            return
+
+        # Thanks -> nod
+        if any(k.lower() in t.lower() for k in ["謝", "thanks", "thx"]):
+            await self._queue_headlook_sequence(["down", "up", "front"], [0.22, 0.22, 0.45])
+            return
+
+        # Default tiny alive motion
+        return
+
 
     # ------------------------------------------------------------------
     # Live gesture triggers (Phase 1)
