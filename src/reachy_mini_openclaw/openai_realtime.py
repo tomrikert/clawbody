@@ -305,6 +305,10 @@ OpenClaw has access to many capabilities you don't have directly.""",
         # Response started - robot is about to speak
         if event_type == "response.created":
             self._speaking = True
+            # Reset per-response gesture state
+            self._gesture_buffer = ""
+            self._gesture_fired = {"neg": False, "pos": False, "q": False, "shy": False}
+            self._gesture_last_t = 0.0
             logger.debug("Response started")
             
         # Audio output from TTS
@@ -325,10 +329,12 @@ OpenClaw has access to many capabilities you don't have directly.""",
             ).reshape(1, -1)
             await self.output_queue.put((OPENAI_SAMPLE_RATE, audio_data))
             
-        # Response text (for logging and UI)
+        # Response text (for logging, UI, and live gesture triggers)
         if event_type == "response.audio_transcript.delta":
-            # Streaming transcript of what's being said
-            pass  # Could log incrementally if needed
+            # Streaming transcript of what's being said (while audio is playing)
+            delta = getattr(event, "transcript", None)
+            if isinstance(delta, str) and delta:
+                await self._on_assistant_transcript_delta(delta)
             
         if event_type == "response.audio_transcript.done":
             response_text = event.transcript
@@ -451,6 +457,86 @@ OpenClaw has access to many capabilities you don't have directly.""",
             logger.error("OpenClaw query failed: %s", e)
             return {"error": str(e)}
             
+
+    # ------------------------------------------------------------------
+    # Live gesture triggers (Phase 1)
+    # ------------------------------------------------------------------
+
+    async def _on_assistant_transcript_delta(self, delta: str) -> None:
+        """Called as the assistant is speaking (streaming transcript).
+
+        We keep voice streaming uninterrupted, and queue small head gestures
+        in parallel based on language cues.
+        """
+        # Lazy-init per-response state
+        if not hasattr(self, "_gesture_buffer"):
+            self._gesture_buffer = ""
+            self._gesture_fired = {"neg": False, "pos": False, "q": False, "shy": False}
+            self._gesture_last_t = 0.0
+
+        self._gesture_buffer += delta
+
+        # Simple cooldown to avoid machine-gun gestures
+        now = asyncio.get_event_loop().time()
+        if now - self._gesture_last_t < 0.6:
+            return
+
+        tail = self._gesture_buffer[-24:]
+
+        def contains_any(s: str, words: list[str]) -> bool:
+            return any(w in s for w in words)
+
+        # 1) Shy / hide face
+        if (not self._gesture_fired["shy"]) and contains_any(tail, ["害羞", "不好意思", "別看", "不要看", "好害羞"]):
+            await self._queue_headlook_sequence(["down", "front"], [0.6, 1.0])
+            self._gesture_fired["shy"] = True
+            self._gesture_last_t = now
+            return
+
+        # 2) Negative -> shake head
+        if (not self._gesture_fired["neg"]) and contains_any(tail, ["不是", "不對", "不行", "沒有", "別", "不要", "不可以"]):
+            await self._queue_headlook_sequence(["left", "right", "left", "front"], [0.25, 0.25, 0.25, 0.4])
+            self._gesture_fired["neg"] = True
+            self._gesture_last_t = now
+            return
+
+        # 3) Positive -> nod
+        if (not self._gesture_fired["pos"]) and contains_any(tail, ["沒錯", "對", "可以", "好", "好的", "行"]):
+            await self._queue_headlook_sequence(["down", "up", "front"], [0.25, 0.25, 0.5])
+            self._gesture_fired["pos"] = True
+            self._gesture_last_t = now
+            return
+
+        # 4) Question -> tilt (approx) using a gentle side glance
+        if (not self._gesture_fired["q"]) and ("?" in tail or "？" in tail or tail.endswith("嗎") or tail.endswith("呢")):
+            await self._queue_headlook_sequence(["right", "front"], [0.4, 0.6])
+            self._gesture_fired["q"] = True
+            self._gesture_last_t = now
+            return
+
+    async def _queue_headlook_sequence(self, directions: list[str], durations: list[float]) -> None:
+        """Queue a short sequence of HeadLookMove moves."""
+        from reachy_mini_openclaw.moves import HeadLookMove
+
+        if not getattr(self.deps, "robot", None):
+            return
+
+        for i, direction in enumerate(directions):
+            duration = durations[i] if i < len(durations) else durations[-1]
+            try:
+                _, current_ant = self.deps.robot.get_current_joint_positions()
+                current_head = self.deps.robot.get_current_head_pose()
+                move = HeadLookMove(
+                    direction=direction,
+                    start_pose=current_head,
+                    start_antennas=tuple(current_ant),
+                    duration=float(duration),
+                )
+                self.deps.movement_manager.queue_move(move)
+            except Exception:
+                # If pose read fails, skip gracefully
+                return
+
     async def receive(self, frame: Tuple[int, NDArray]) -> None:
         """Receive audio from the robot microphone."""
         if not self.connection:
