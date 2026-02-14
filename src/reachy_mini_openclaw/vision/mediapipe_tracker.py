@@ -61,8 +61,9 @@ class HeadTracker:
         h, w = img.shape[:2]
 
         try:
-            # Convert BGR to RGB for MediaPipe
-            rgb_img = img[:, :, ::-1]
+            logger.debug(f"Processing image shape: {img.shape}")
+            # Convert BGR to RGB for MediaPipe and ensure contiguous memory
+            rgb_img = np.ascontiguousarray(img[:, :, ::-1])
             
             # Run face detection
             results = self.face_detection.process(rgb_img)
