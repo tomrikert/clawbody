@@ -382,6 +382,21 @@ async def _handle_emotion(args: dict, deps: ToolDependencies) -> dict:
 
     emotion_name = args.get("emotion_name", "happy")
 
+    # If Reachy Mini daemon recorded emotions are available, prefer them.
+    # This unlocks the full expressions library (e.g., sad2/downcast1/oops1/success1...).
+    try:
+        from reachy_mini_openclaw.capabilities.registry import (
+            DEFAULT_RECORDED_EMOTIONS_DATASET,
+            play_recorded_move,
+        )
+
+        if isinstance(emotion_name, str) and emotion_name:
+            if play_recorded_move(DEFAULT_RECORDED_EMOTIONS_DATASET, emotion_name):
+                return {"status": "success", "emotion": emotion_name, "source": "recorded_dataset"}
+    except Exception:
+        pass
+
+
     # Map emotions to simple head movements (macro fallback)
     emotion_sequences: dict[str, list[str]] = {
         "happy": ["up", "front"],
