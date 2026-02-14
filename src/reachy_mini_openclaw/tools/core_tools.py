@@ -11,6 +11,7 @@ Tool Categories:
 import json
 import logging
 import base64
+import asyncio
 from dataclasses import dataclass
 from typing import Any, Optional, TYPE_CHECKING
 
@@ -124,6 +125,32 @@ TOOL_SPECS = [
     },
     {
         "type": "function",
+        "name": "body_sway",
+        "description": "Sway the robot body/base left-right (body_yaw) then return. Useful for expressive emphasis.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "amplitude_deg": {
+                    "type": "number",
+                    "description": "Yaw amplitude in degrees (default 12).",
+                    "default": 12
+                },
+                "repeats": {
+                    "type": "integer",
+                    "description": "Number of left-right cycles (default 1).",
+                    "default": 1
+                },
+                "duration": {
+                    "type": "number",
+                    "description": "Seconds per half-sway (default 0.6).",
+                    "default": 0.6
+                }
+            },
+            "required": []
+        }
+    },
+    {
+        "type": "function",
         "name": "stop_moves",
         "description": "Stop all current movements and clear the movement queue.",
         "parameters": {
@@ -181,6 +208,7 @@ async def dispatch_tool_call(
         "dance": _handle_dance,
         "emotion": _handle_emotion,
         "capabilities": _handle_capabilities,
+        "body_sway": _handle_body_sway,
         "stop_moves": _handle_stop_moves,
         "idle": _handle_idle,
     }
@@ -423,6 +451,56 @@ async def _handle_capabilities(args: dict, deps: ToolDependencies) -> dict:
         "emotion_names": report.emotion_names,
         "notes": report.notes,
     }
+
+
+async def _handle_body_sway(args: dict, deps: ToolDependencies) -> dict:
+    """Sway the robot base/body yaw left-right then return.
+
+    This uses Reachy Mini SDK `goto_target(body_yaw=...)` if available.
+    If unsupported, returns an error.
+    """
+    import numpy as _np
+
+    amp_deg = float(args.get("amplitude_deg", 12) or 12)
+    repeats = int(args.get("repeats", 1) or 1)
+    duration = float(args.get("duration", 0.6) or 0.6)
+
+    # Clamp to a conservative safe range
+    amp_deg = max(3.0, min(25.0, amp_deg))
+    repeats = max(1, min(3, repeats))
+    duration = max(0.25, min(2.0, duration))
+
+    robot = getattr(deps, "robot", None)
+    if robot is None or not hasattr(robot, "goto_target"):
+        return {"error": "body_sway not available (robot.goto_target not found)"}
+
+    async def _runner():
+        try:
+            # Try to preserve current body yaw if readable
+            start_yaw = 0.0
+            try:
+                # Some SDK versions expose current joint positions.
+                # If unavailable, we just return to 0.
+                _jp = getattr(robot, "get_current_joint_positions", None)
+                if callable(_jp):
+                    _, _ant = robot.get_current_joint_positions()
+                # No reliable body yaw getter found; keep 0.
+            except Exception:
+                pass
+
+            amp = float(_np.deg2rad(amp_deg))
+            for _ in range(repeats):
+                robot.goto_target(body_yaw=+amp, duration=duration, method="minjerk")
+                await asyncio.sleep(duration)
+                robot.goto_target(body_yaw=-amp, duration=duration, method="minjerk")
+                await asyncio.sleep(duration)
+
+            robot.goto_target(body_yaw=float(start_yaw), duration=duration, method="minjerk")
+        except Exception:
+            return
+
+    asyncio.create_task(_runner())
+    return {"status": "success", "amplitude_deg": amp_deg, "repeats": repeats}
 
 
 async def _handle_stop_moves(args: dict, deps: ToolDependencies) -> dict:

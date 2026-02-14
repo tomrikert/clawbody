@@ -300,6 +300,11 @@ OpenClaw has access to many capabilities you don't have directly.""",
             self._gesture_buffer = ""
             self._gesture_fired = {"neg": False, "pos": False, "q": False, "shy": False}
             self._gesture_last_t = 0.0
+            # Audio/transcript alignment state (best-effort)
+            self._audio_enqueued_s = 0.0
+            self._audio_start_t = None
+            self._transcript_total_chars = 0
+            self._pending_gestures = {}
             logger.debug("Response started")
             
         # Audio output from TTS
@@ -319,6 +324,14 @@ OpenClaw has access to many capabilities you don't have directly.""",
                 dtype=np.int16
             ).reshape(1, -1)
             await self.output_queue.put((OPENAI_SAMPLE_RATE, audio_data))
+            # Track audio playback progress (approx): seconds enqueued since response start
+            try:
+                if self._audio_start_t is None:
+                    self._audio_start_t = asyncio.get_event_loop().time()
+                # audio_data is int16 mono (shape 1 x N)
+                self._audio_enqueued_s += float(audio_data.shape[-1]) / float(OPENAI_SAMPLE_RATE)
+            except Exception:
+                pass
             
         # Response text (for logging, UI, and live gesture triggers)
         if event_type == "response.audio_transcript.delta":
@@ -458,6 +471,11 @@ OpenClaw has access to many capabilities you don't have directly.""",
 
         We keep voice streaming uninterrupted, and queue small head gestures
         in parallel based on language cues.
+
+        Timing note:
+        Transcript deltas may arrive ahead of audio playback. We therefore
+        schedule gestures based on transcript position aligned to audio
+        playback progress (best-effort).
         """
         # Lazy-init per-response state
         if not hasattr(self, "_gesture_buffer"):
@@ -465,45 +483,83 @@ OpenClaw has access to many capabilities you don't have directly.""",
             self._gesture_fired = {"neg": False, "pos": False, "q": False, "shy": False}
             self._gesture_last_t = 0.0
 
-        self._gesture_buffer += delta
+        if not hasattr(self, "_transcript_total_chars"):
+            self._transcript_total_chars = 0
+        if not hasattr(self, "_pending_gestures"):
+            self._pending_gestures = {}
 
-        # Simple cooldown to avoid machine-gun gestures
+        self._gesture_buffer += delta
+        self._transcript_total_chars += len(delta)
+
+        # Cooldown to avoid machine-gun gestures
         now = asyncio.get_event_loop().time()
-        if now - self._gesture_last_t < 0.6:
+        if now - float(getattr(self, "_gesture_last_t", 0.0)) < 0.45:
             return
 
-        tail = self._gesture_buffer[-24:]
+        buf = self._gesture_buffer
+        tail = buf[-48:]
 
-        def contains_any(s: str, words: list[str]) -> bool:
-            return any(w in s for w in words)
+        def contains_any(s: str, words: list[str]) -> str | None:
+            for w in words:
+                if w in s:
+                    return w
+            return None
 
         # 1) Shy / hide face
-        if (not self._gesture_fired["shy"]) and contains_any(tail, ["害羞", "不好意思", "別看", "不要看", "好害羞"]):
-            await self._queue_headlook_sequence(["down", "front"], [0.8, 1.0])
-            self._gesture_fired["shy"] = True
-            self._gesture_last_t = now
-            return
+        if (not self._gesture_fired["shy"]):
+            hit = contains_any(tail, ["害羞", "不好意思", "別看", "不要看", "好害羞"])
+            if hit:
+                idx = buf.rfind(hit)
+                await self._schedule_gesture_at_char("shy", idx, ["down", "front"], [0.8, 1.0])
+                self._gesture_fired["shy"] = True
+                self._gesture_last_t = now
+                return
 
         # 2) Negative -> shake head
-        if (not self._gesture_fired["neg"]) and contains_any(tail, ["不是", "不對", "不行", "沒有", "別", "不要", "不可以"]):
-            await self._queue_headlook_sequence(["left", "right", "left", "right", "left", "front"], [0.22, 0.22, 0.22, 0.22, 0.22, 0.35])
-            self._gesture_fired["neg"] = True
-            self._gesture_last_t = now
-            return
+        if (not self._gesture_fired["neg"]):
+            hit = contains_any(tail, ["不是", "不對", "不行", "沒有", "別", "不要", "不可以", "不是喔", "不是這樣"])
+            if hit:
+                idx = buf.rfind(hit)
+                await self._schedule_gesture_at_char(
+                    "neg",
+                    idx,
+                    ["left", "right", "left", "right", "left", "front"],
+                    [0.22, 0.22, 0.22, 0.22, 0.22, 0.35],
+                )
+                self._gesture_fired["neg"] = True
+                self._gesture_last_t = now
+                return
 
         # 3) Positive -> nod
-        if (not self._gesture_fired["pos"]) and contains_any(tail, ["沒錯", "對", "可以", "好", "好的", "行"]):
-            await self._queue_headlook_sequence(["down", "up", "down", "up", "front"], [0.22, 0.22, 0.22, 0.22, 0.40])
-            self._gesture_fired["pos"] = True
-            self._gesture_last_t = now
-            return
+        if (not self._gesture_fired["pos"]):
+            hit = contains_any(tail, ["沒錯", "對", "可以", "好", "好的", "行", "同意"])
+            if hit:
+                idx = buf.rfind(hit)
+                await self._schedule_gesture_at_char(
+                    "pos",
+                    idx,
+                    ["down", "up", "down", "up", "front"],
+                    [0.22, 0.22, 0.22, 0.22, 0.40],
+                )
+                self._gesture_fired["pos"] = True
+                self._gesture_last_t = now
+                return
 
-        # 4) Question -> tilt (approx) using a gentle side glance
-        if (not self._gesture_fired["q"]) and ("?" in tail or "？" in tail or tail.endswith("嗎") or tail.endswith("呢")):
-            await self._queue_headlook_sequence(["right", "left", "right", "front"], [0.22, 0.22, 0.22, 0.45])
-            self._gesture_fired["q"] = True
-            self._gesture_last_t = now
-            return
+        # 4) Question -> tilt-ish (gentle side glance)
+        if (not self._gesture_fired["q"]):
+            # Trigger at the most recent question marker.
+            qpos = max(buf.rfind("?"), buf.rfind("？"))
+            if qpos != -1 or tail.endswith("嗎") or tail.endswith("呢"):
+                idx = qpos if qpos != -1 else (len(buf) - 1)
+                await self._schedule_gesture_at_char(
+                    "q",
+                    idx,
+                    ["right", "left", "right", "front"],
+                    [0.22, 0.22, 0.22, 0.45],
+                )
+                self._gesture_fired["q"] = True
+                self._gesture_last_t = now
+                return
 
     async def _queue_headlook_sequence(self, directions: list[str], durations: list[float]) -> None:
         """Queue a short sequence of HeadLookMove moves."""
