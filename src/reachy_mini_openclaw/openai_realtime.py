@@ -392,7 +392,14 @@ OpenClaw has access to many capabilities you don't have directly.""",
                 # Robot movement tools - dispatch locally
                 result = await dispatch_tool_call(tool_name, args_json, self.deps)
                 
-            logger.debug("Tool '%s' result: %s", tool_name, str(result)[:100])
+            # Log tool results at INFO when relevant (helps debugging on robot)
+            try:
+                if isinstance(result, dict) and result.get("error"):
+                    logger.warning("Tool %s error: %s", tool_name, result.get("error"))
+                elif tool_name != "ask_openclaw":
+                    logger.info("Tool %s result: %s", tool_name, str(result)[:200])
+            except Exception:
+                pass
         except Exception as e:
             logger.error("Tool '%s' failed: %s", tool_name, e)
             result = {"error": str(e)}
