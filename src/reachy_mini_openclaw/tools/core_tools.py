@@ -11,6 +11,7 @@ Tool Categories:
 import json
 import logging
 import base64
+import asyncio
 from dataclasses import dataclass
 from typing import Any, Optional, TYPE_CHECKING
 
@@ -85,14 +86,13 @@ TOOL_SPECS = [
     {
         "type": "function",
         "name": "dance",
-        "description": "Perform a dance animation. Use this to express joy, celebrate, or entertain.",
+        "description": "Perform a dance animation. Accepts any string; available dances depend on installed libraries. Falls back to macro movements if missing.",
         "parameters": {
             "type": "object",
             "properties": {
                 "dance_name": {
                     "type": "string",
-                    "enum": ["happy", "excited", "wave", "nod", "shake", "bounce"],
-                    "description": "The dance to perform"
+                    "description": "Dance name (e.g., happy, excited, wave, nod, shake, bounce)."
                 }
             },
             "required": ["dance_name"]
@@ -101,17 +101,52 @@ TOOL_SPECS = [
     {
         "type": "function",
         "name": "emotion",
-        "description": "Express an emotion through movement. Use this to show reactions and feelings.",
+        "description": "Express an emotion through movement. Accepts any string; available emotions depend on installed libraries. Falls back to macro movements if missing.",
         "parameters": {
             "type": "object",
             "properties": {
                 "emotion_name": {
                     "type": "string",
-                    "enum": ["happy", "sad", "surprised", "curious", "thinking", "confused", "excited"],
-                    "description": "The emotion to express"
+                    "description": "Emotion name (e.g., happy, sad, surprised, curious, thinking, confused, excited)."
                 }
             },
             "required": ["emotion_name"]
+        }
+    },
+    {
+        "type": "function",
+        "name": "capabilities",
+        "description": "List available dances/emotions detected at runtime (and macro fallbacks). Useful for debugging and UIs.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    },
+    {
+        "type": "function",
+        "name": "body_sway",
+        "description": "Sway the robot body/base left-right (body_yaw) then return. Useful for expressive emphasis.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "amplitude_deg": {
+                    "type": "number",
+                    "description": "Yaw amplitude in degrees (default 12).",
+                    "default": 12
+                },
+                "repeats": {
+                    "type": "integer",
+                    "description": "Number of left-right cycles (default 1).",
+                    "default": 1
+                },
+                "duration": {
+                    "type": "number",
+                    "description": "Seconds per half-sway (default 0.6).",
+                    "default": 0.6
+                }
+            },
+            "required": []
         }
     },
     {
@@ -128,6 +163,16 @@ TOOL_SPECS = [
         "type": "function",
         "name": "idle",
         "description": "Do nothing and remain idle. Use this when you want to stay still.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    },
+    {
+        "type": "function",
+        "name": "shutdown",
+        "description": "Stop the robot service and shutdown the AI assistant app. Use this when the user says goodbye or explicitly asks you to stop or turn off (e.g., 'Clawbody, please shutdown').",
         "parameters": {
             "type": "object",
             "properties": {},
@@ -172,8 +217,11 @@ async def dispatch_tool_call(
         "face_tracking": _handle_face_tracking,
         "dance": _handle_dance,
         "emotion": _handle_emotion,
+        "capabilities": _handle_capabilities,
+        "body_sway": _handle_body_sway,
         "stop_moves": _handle_stop_moves,
         "idle": _handle_idle,
+        "shutdown": _handle_shutdown,
     }
     
     handler = handlers.get(tool_name)
@@ -185,6 +233,24 @@ async def dispatch_tool_call(
     except Exception as e:
         logger.error("Tool '%s' failed: %s", tool_name, e, exc_info=True)
         return {"error": str(e)}
+
+
+async def _handle_shutdown(args: dict, deps: ToolDependencies) -> dict:
+    """Handle the shutdown tool."""
+    logger.warning("AI requested shutdown!")
+    
+    async def _do_shutdown():
+        # Give a short delay to allow the response to be spoken
+        await asyncio.sleep(3.0)
+        logger.warning("Initiating app shutdown...")
+        os._exit(0) # Force exit
+        
+    asyncio.create_task(_do_shutdown())
+    
+    return {
+        "status": "success", 
+        "message": "Shutting down the assistant app as requested. Goodbye!"
+    }
 
 
 async def _handle_look(args: dict, deps: ToolDependencies) -> dict:
@@ -309,36 +375,59 @@ async def _handle_face_tracking(args: dict, deps: ToolDependencies) -> dict:
 
 
 async def _handle_dance(args: dict, deps: ToolDependencies) -> dict:
-    """Handle dance tool."""
+    """Handle dance tool.
+
+    If reachy_mini_dances_library is installed, use its dances.
+    Otherwise fall back to macro movements (emotion handler).
+    """
+    from reachy_mini_openclaw.capabilities.registry import get_dance_factory
+
     dance_name = args.get("dance_name", "happy")
-    
+
     try:
-        # Try to use dance library if available
-        from reachy_mini_dances_library import dances
-        
-        if hasattr(dances, dance_name):
-            dance_class = getattr(dances, dance_name)
-            dance_move = dance_class()
+        factory = get_dance_factory(dance_name)
+        if factory is not None:
+            dance_move = factory()
             deps.movement_manager.queue_move(dance_move)
-            return {"status": "success", "dance": dance_name}
-        else:
-            # Fallback to simple head movement
-            return await _handle_emotion({"emotion_name": dance_name}, deps)
-    except ImportError:
-        # No dance library, use emotion as fallback
-        return await _handle_emotion({"emotion_name": dance_name}, deps)
+            return {"status": "success", "dance": dance_name, "source": "dance_library"}
+
+        # Fallback to simple head movement macros
+        result = await _handle_emotion({"emotion_name": dance_name}, deps)
+        result.setdefault("source", "macro_fallback")
+        result.setdefault("dance", dance_name)
+        return result
     except Exception as e:
         return {"error": str(e)}
 
 
 async def _handle_emotion(args: dict, deps: ToolDependencies) -> dict:
-    """Handle emotion expression."""
+    """Handle emotion expression.
+
+    Currently implemented as macro head-movement sequences.
+    If a future Reachy Mini SDK exposes emotion primitives, this is
+    the place to route to them.
+    """
     from reachy_mini_openclaw.moves import HeadLookMove
-    
+
     emotion_name = args.get("emotion_name", "happy")
-    
-    # Map emotions to simple head movements
-    emotion_sequences = {
+
+    # If Reachy Mini daemon recorded emotions are available, prefer them.
+    # This unlocks the full expressions library (e.g., sad2/downcast1/oops1/success1...).
+    try:
+        from reachy_mini_openclaw.capabilities.registry import (
+            DEFAULT_RECORDED_EMOTIONS_DATASET,
+            play_recorded_move,
+        )
+
+        if isinstance(emotion_name, str) and emotion_name:
+            if play_recorded_move(DEFAULT_RECORDED_EMOTIONS_DATASET, emotion_name):
+                return {"status": "success", "emotion": emotion_name, "source": "recorded_dataset"}
+    except Exception:
+        pass
+
+
+    # Map emotions to simple head movements (macro fallback)
+    emotion_sequences: dict[str, list[str]] = {
         "happy": ["up", "front"],
         "sad": ["down"],
         "surprised": ["up", "front"],
@@ -346,26 +435,116 @@ async def _handle_emotion(args: dict, deps: ToolDependencies) -> dict:
         "thinking": ["up", "left"],
         "confused": ["left", "right", "front"],
         "excited": ["up", "down", "up", "front"],
+        # Common aliases / gestures (exaggerated macros)
+        # Note: amplitude depends on Reachy safety/limits; we exaggerate by repetition + snappier timing.
+        "wave": ["right", "left", "right", "front"],
+        "nod": ["down", "up", "down", "up", "front"],
+        "shake": ["left", "right", "left", "right", "left", "front"],
+        "bounce": ["down", "up", "down", "front"],
     }
-    
+
     sequence = emotion_sequences.get(emotion_name, ["front"])
-    
+
     try:
         for direction in sequence:
             _, current_ant = deps.robot.get_current_joint_positions()
             current_head = deps.robot.get_current_head_pose()
-            
+
             move = HeadLookMove(
                 direction=direction,
                 start_pose=current_head,
                 start_antennas=tuple(current_ant),
-                duration=0.5,
+                duration=0.32,
             )
             deps.movement_manager.queue_move(move)
-        
-        return {"status": "success", "emotion": emotion_name}
+
+        return {
+            "status": "success",
+            "emotion": emotion_name,
+            "source": "macro",
+            "known": emotion_name in emotion_sequences,
+        }
     except Exception as e:
         return {"error": str(e)}
+
+
+async def _handle_capabilities(args: dict, deps: ToolDependencies) -> dict:
+    """Return a runtime report of available dances/emotions."""
+    from reachy_mini_openclaw.capabilities.registry import capabilities_report
+
+    macro_emotions = [
+        "happy",
+        "sad",
+        "surprised",
+        "curious",
+        "thinking",
+        "confused",
+        "excited",
+        "wave",
+        "nod",
+        "shake",
+        "bounce",
+    ]
+
+    report = capabilities_report(macro_emotions=macro_emotions, macro_dances=["wave", "nod", "shake", "bounce"])
+    return {
+        "status": "success",
+        "dances_available": report.dances_available,
+        "dance_names": report.dance_names,
+        "emotions_available": report.emotions_available,
+        "emotion_names": report.emotion_names,
+        "notes": report.notes,
+    }
+
+
+async def _handle_body_sway(args: dict, deps: ToolDependencies) -> dict:
+    """Sway the robot base/body yaw left-right then return.
+
+    This uses Reachy Mini SDK `goto_target(body_yaw=...)` if available.
+    If unsupported, returns an error.
+    """
+    import numpy as _np
+
+    amp_deg = float(args.get("amplitude_deg", 12) or 12)
+    repeats = int(args.get("repeats", 1) or 1)
+    duration = float(args.get("duration", 0.6) or 0.6)
+
+    # Clamp to a conservative safe range
+    amp_deg = max(3.0, min(25.0, amp_deg))
+    repeats = max(1, min(3, repeats))
+    duration = max(0.25, min(2.0, duration))
+
+    robot = getattr(deps, "robot", None)
+    if robot is None or not hasattr(robot, "goto_target"):
+        return {"error": "body_sway not available (robot.goto_target not found)"}
+
+    async def _runner():
+        try:
+            # Try to preserve current body yaw if readable
+            start_yaw = 0.0
+            try:
+                # Some SDK versions expose current joint positions.
+                # If unavailable, we just return to 0.
+                _jp = getattr(robot, "get_current_joint_positions", None)
+                if callable(_jp):
+                    _, _ant = robot.get_current_joint_positions()
+                # No reliable body yaw getter found; keep 0.
+            except Exception:
+                pass
+
+            amp = float(_np.deg2rad(amp_deg))
+            for _ in range(repeats):
+                robot.goto_target(body_yaw=+amp, duration=duration, method="minjerk")
+                await asyncio.sleep(duration)
+                robot.goto_target(body_yaw=-amp, duration=duration, method="minjerk")
+                await asyncio.sleep(duration)
+
+            robot.goto_target(body_yaw=float(start_yaw), duration=duration, method="minjerk")
+        except Exception:
+            return
+
+    asyncio.create_task(_runner())
+    return {"status": "success", "amplitude_deg": amp_deg, "repeats": repeats}
 
 
 async def _handle_stop_moves(args: dict, deps: ToolDependencies) -> dict:

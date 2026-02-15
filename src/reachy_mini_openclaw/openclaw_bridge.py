@@ -135,11 +135,16 @@ class OpenClawBridge:
             "set" if self.gateway_token else "not set",
         )
         try:
+            # Set Origin header to match the gateway host to bypass CORS/Origin checks
+            # Using 'origin' parameter which is supported in older websockets versions
+            origin = "https://dabclaw.zeabur.app"
+            
             self._ws = await websockets.connect(
                 self.gateway_url,
                 ping_interval=20,
                 ping_timeout=30,
                 close_timeout=5,
+                origin=origin,
             )
 
             # 1. Receive challenge

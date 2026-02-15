@@ -33,289 +33,169 @@ tags:
 
 # 🦞🤖 ClawBody
 
-**Give your OpenClaw AI agent a physical robot body!**
+**Give your OpenClaw AI agent an expressive, embodied physical body!**
 
-ClawBody combines OpenClaw's AI intelligence with Reachy Mini's expressive robot body, using OpenAI's Realtime API for ultra-responsive voice conversation. Your OpenClaw assistant (Clawson) can now see, hear, speak, and move in the physical world.
+[繁體中文版 (Traditional Chinese)](README_zh-TW.md)
+
+ClawBody bridges the gap between high-level AI intelligence (OpenClaw) and low-level robotic control (Reachy Mini). By leveraging OpenAI's Realtime API, it creates an ultra-low latency, speech-to-speech interaction loop where your AI assistant, Clawson, can see, hear, and express emotions physically.
 
 ![Reachy Mini Dance](https://huggingface.co/spaces/pollen-robotics/reachy_mini_conversation_app/resolve/main/docs/assets/reachy_mini_dance.gif)
 
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+---
+
+## 🚀 Key Improvements (Feb 2026)
+
+- **Natural Embodiment**: Introduced **Natural Turn-Level Gestures** and **Speech-Synced Body Sway**.
+- **Dynamic Capability Discovery**: A new **Capability Registry** automatically scans for recorded expressions and dances.
+- **Context-Aware Triggers**: Added support for **Cue Word Gestures** from live transcripts.
+- **Enhanced Perception**: Optimized MediaPipe tracking and resolved OpenClaw Gateway CORS issues.
 
 ---
 
-## 👁️ NEW: Face Tracking & Eye Contact
+## 🚀 Getting Started
 
-**The robot looks at you when you speak!**
+### 💡 Critical Usage Note: Virtual Environment
+If you installed ClawBody within a virtual environment, you **must** use the environment's python/bin to run it.
 
-ClawBody now includes real-time face tracking that makes conversations feel natural and engaging:
-
-- **Automatic Face Detection**: Uses MediaPipe or YOLO to detect faces at 25Hz
-- **Smooth Head Tracking**: Robot smoothly follows your face as you move
-- **Natural Eye Contact**: Maintains engagement during conversation
-- **Graceful Fallback**: Smoothly returns to neutral position when you leave
-
+**For local/simulator setup:**
 ```bash
-# Face tracking is enabled by default
-clawbody
-
-# Choose your tracker (MediaPipe is lighter, YOLO is more accurate)
-clawbody --head-tracker mediapipe
-clawbody --head-tracker yolo
-
-# Disable if needed
-clawbody --no-face-tracking
-```
-
----
-
-## 🎮 No Robot? No Problem!
-
-**You don't need a physical Reachy Mini robot to use ClawBody!**
-
-ClawBody works with the [Reachy Mini Simulator](https://huggingface.co/docs/reachy_mini/platforms/simulation/get_started), a MuJoCo-based physics simulation that runs on your computer. Watch Clawson move and express emotions on screen while you talk to your OpenClaw agent.
-
-```bash
-# Install simulator support
-pip install "reachy-mini[mujoco]"
-
-# Start the simulator (opens a 3D window)
-reachy-mini-daemon --sim
-
-# In another terminal, run ClawBody
+source .venv/bin/activate
 clawbody --gradio
 ```
 
-> 🍎 **Mac Users**: Use `mjpython -m reachy_mini.daemon.app.main --sim` instead.
+**For physical robot setup:**
+```bash
+/venvs/apps_venv/bin/clawbody --gradio
+```
+
+---
+
+### Option A: Installation for Simulator
+
+```bash
+git clone https://github.com/dAAAb/clawbody
+cd clawbody
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[mediapipe_vision]"
+pip install "reachy-mini[mujoco]"
+
+# Configure your .env
+cp .env.example .env
+
+# Terminal 1: Run Simulator
+reachy-mini-daemon --sim
+
+# Terminal 2: Start ClawBody
+source .venv/bin/activate
+clawbody --gradio
+```
+
+---
+
+### Option B: Installation on Physical Robot
+
+The Reachy Mini robot comes with a pre-configured application environment at `/venvs/apps_venv/`.
+
+```bash
+# Connect to your robot
+ssh pollen@reachy-mini.local
+
+# Clone and install into the robot's app environment
+git clone https://github.com/dAAAb/clawbody
+cd clawbody
+/venvs/apps_venv/bin/pip install -e .
+
+# Run directly on hardware (with Gradio enabled)
+/venvs/apps_venv/bin/clawbody --gradio
+```
+
+---
+
+## 🤖 Automation & Background Service
+
+On a physical Reachy Mini, you can register ClawBody as a managed service using the `reachy-mini-daemon` tool so it starts automatically when the robot boots up. **We recommend enabling `--gradio` for remote management.**
+
+### 1. Register the Application
+Run this command from any directory. Note the use of `--args "--gradio"` to enable the web UI:
+
+```bash
+/venvs/apps_venv/bin/reachy-mini-daemon app register clawbody --path /home/pollen/clawbody --args "--gradio"
+```
+
+### 2. Enable Auto-start on Boot
+```bash
+/venvs/apps_venv/bin/reachy-mini-daemon app enable clawbody
+```
+
+### 3. Management Commands
+| Action | Command |
+|--------|---------|
+| **Start** | `/venvs/apps_venv/bin/reachy-mini-daemon app start clawbody` |
+| **Stop** | `/venvs/apps_venv/bin/reachy-mini-daemon app stop clawbody` |
+| **Status** | `/venvs/apps_venv/bin/reachy-mini-daemon app list` |
+| **Logs** | `/venvs/apps_venv/bin/reachy-mini-daemon app logs clawbody` |
+
+---
+
+## 🛑 Remote Shutdown (No SSH Required)
+
+To use these features, ensure the app was started with the `--gradio` flag (see Automation section).
+
+### 1. Web UI Shutdown (Gradio)
+Access the UI at `http://reachy-mini.local:7860`:
+- Click the **"🛑 Shutdown App"** button.
+- This will completely terminate the background Python process.
+
+### 2. Voice Command Shutdown
+You can tell the AI to stop directly:
+- **Example**: "Hey Clawbody, please shutdown", "Stop service and rest", "Goodbye".
+- The AI will bid you farewell and safely exit the application after a 3-second delay.
+
+---
+
+## ⚙️ Configuration & Remote Deployment
+
+### Connecting to Zeabur / Remote OpenClaw
+When connecting to a remote OpenClaw instance (e.g., hosted on Zeabur):
+
+1. **Protocol Matters**: Use `https://` for remote instances.
+2. **WebSocket (WSS)**: ClawBody communicates via WebSockets. Ensure your remote deployment handles `wss://` traffic correctly.
+3. **CORS/Auth**: Verify `OPENCLAW_TOKEN` and gateway permissions.
+
+Example `.env`:
+```bash
+OPENCLAW_GATEWAY_URL=https://your-openclaw-on-zeabur.zeabur.app
+OPENCLAW_TOKEN=your-secure-token
+```
 
 ---
 
 ## ✨ Features
 
-- **👁️ Face Tracking**: Robot tracks your face and maintains eye contact during conversation
-- **🎤 Real-time Voice Conversation**: OpenAI Realtime API for sub-second response latency
-- **🧠 OpenClaw Intelligence**: Your responses come from OpenClaw with full tool access
-- **👀 Vision**: See through the robot's camera and describe the environment
-- **💃 Expressive Movements**: Natural head movements, emotions, dances, and audio-driven wobble
-- **🦞 Clawson Embodied**: Your friendly space lobster AI assistant, now with a body!
-- **🖥️ Simulator Support**: Works with or without physical hardware
+- **👁️ Intelligent Eye Contact**: Real-time face tracking (MediaPipe/YOLO) at 25Hz.
+- **🎭 Expressive Gestures**: Automatic gestures synced to voice output.
+- **🧠 OpenClaw Integration**: Full tool-calling capabilities through a physical persona.
+- **💃 Emotion Engine**: Dynamic discovery and playback of pre-recorded behaviors.
+- **🎤 Low-Latency Voice**: Powered by OpenAI Realtime API.
+- **🖥️ Simulator-First**: Full support for MuJoCo simulation.
 
-## 🏗️ Architecture
+---
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                     Your Voice / Microphone                      │
-└─────────────────────────────┬───────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│              Reachy Mini Robot (or Simulator)                    │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │
-│  │ Microphone  │  │   Camera    │  │   Movement System       │  │
-│  │  (input)    │  │  (vision)   │  │ (head, antennas, body)  │  │
-│  └──────┬──────┘  └──────┬──────┘  └────────────▲────────────┘  │
-└─────────┼────────────────┼──────────────────────┼───────────────┘
-          │                │                      │
-          ▼                ▼                      │
-┌─────────────────────────────────────────────────┼───────────────┐
-│                      ClawBody                   │               │
-│  ┌─────────────────────────────────────────────┼────────────┐  │
-│  │         OpenAI Realtime API Handler         │            │  │
-│  │  • Speech recognition (Whisper)             │            │  │
-│  │  • Text-to-speech (voices)                 ─┘            │  │
-│  │  • Audio analysis → head wobble                          │  │
-│  └─────────────────────────────────────────────────────────┘  │
-│                           │                                     │
-│                           ▼                                     │
-│  ┌─────────────────────────────────────────────────────────┐  │
-│  │              OpenClaw Gateway Bridge                     │  │
-│  │  • AI responses from Clawson                            │  │
-│  │  • Full OpenClaw tool access                            │  │
-│  │  • Conversation memory & context                        │  │
-│  └─────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    OpenClaw Gateway                              │
-│  • Web browsing  • Calendar  • Smart home  • Memory  • Tools    │
-└─────────────────────────────────────────────────────────────────┘
-```
+## 🛠️ Robot Capabilities (AI-Accessible)
 
-## 📋 Prerequisites
+| Capability | Technical Details |
+|------------|-------------------|
+| **Natural Gestures** | Turn-level triggers synced to transcript deltas |
+| **Emotion Registry** | Dynamic discovery of daemon-recorded expressions |
+| **Face Tracking** | PID-controlled head movement using 25Hz vision data |
+| **Vision Description** | Captures frames and uses GPT-4o-mini for scene understanding |
 
-### Option A: With Physical Robot
-- [Reachy Mini](https://www.pollen-robotics.com/reachy-mini/) robot (Wireless or Lite)
-
-### Option B: With Simulator (No Hardware Required!)
-- Any computer with Python 3.11+
-- Install: `pip install "reachy-mini[mujoco]"`
-- [Simulation Setup Guide](https://huggingface.co/docs/reachy_mini/platforms/simulation/get_started)
-
-### Software (Both Options)
-- Python 3.11+
-- [Reachy Mini SDK](https://github.com/pollen-robotics/reachy_mini) installed
-- [OpenClaw](https://github.com/openclaw/openclaw) gateway running
-- OpenAI API key with Realtime API access
-
-## 🚀 Installation
-
-### Quick Start with Simulator
-
-```bash
-# Clone ClawBody
-git clone https://github.com/tomrikert/clawbody
-cd clawbody
-
-# Create virtual environment
-python -m venv .venv
-source .venv/bin/activate
-
-# Install ClawBody + simulator support + face tracking
-pip install -e ".[mediapipe_vision]"
-pip install "reachy-mini[mujoco]"
-
-# Or for more accurate face tracking (requires more resources)
-# pip install -e ".[yolo_vision]"
-
-# Configure (see Configuration section)
-cp .env.example .env
-# Edit .env with your keys
-
-# Terminal 1: Start the simulator
-reachy-mini-daemon --sim
-
-# Terminal 2: Run ClawBody
-clawbody --gradio
-```
-
-### On a Physical Reachy Mini Robot
-
-```bash
-# SSH into the robot
-ssh pollen@reachy-mini.local
-
-# Clone the repository
-git clone https://github.com/tomrikert/clawbody
-cd clawbody
-
-# Install in the apps virtual environment
-/venvs/apps_venv/bin/pip install -e .
-```
-
-## ⚙️ Configuration
-
-1. Copy the example environment file:
-
-```bash
-cp .env.example .env
-```
-
-2. Edit `.env` with your configuration:
-
-```bash
-# Required
-OPENAI_API_KEY=sk-...your-key...
-
-# OpenClaw Gateway (required for AI responses)
-OPENCLAW_GATEWAY_URL=http://localhost:18789  # or your host IP
-OPENCLAW_TOKEN=your-gateway-token
-OPENCLAW_AGENT_ID=main
-
-# Optional - Customize voice
-OPENAI_VOICE=cedar
-
-# Optional - Face tracking (enabled by default)
-ENABLE_FACE_TRACKING=true
-HEAD_TRACKER_TYPE=mediapipe  # or "yolo" for more accuracy
-```
-
-## 🎮 Usage
-
-### With Simulator
-
-```bash
-# Terminal 1: Start simulator
-reachy-mini-daemon --sim
-
-# Terminal 2: Run ClawBody with web UI (recommended for simulator)
-clawbody --gradio
-```
-
-The simulator opens a 3D window where you can watch the robot move. The Gradio web UI at http://localhost:7860 lets you interact via your browser's microphone.
-
-### With Physical Robot
-
-```bash
-# Basic usage
-clawbody
-
-# With debug logging
-clawbody --debug
-
-# With specific robot
-clawbody --robot-name my-reachy
-```
-
-### CLI Options
-
-| Option | Description |
-|--------|-------------|
-| `--debug` | Enable debug logging |
-| `--gradio` | Launch web UI instead of console mode |
-| `--robot-name NAME` | Specify robot name for connection |
-| `--gateway-url URL` | OpenClaw gateway URL |
-| `--no-camera` | Disable camera functionality |
-| `--no-openclaw` | Disable OpenClaw integration |
-| `--head-tracker TYPE` | Face tracker: `mediapipe` (lighter) or `yolo` (more accurate) |
-| `--no-face-tracking` | Disable face tracking |
-
-## 🛠️ Robot Capabilities
-
-ClawBody gives Clawson these physical abilities:
-
-| Capability | Description |
-|------------|-------------|
-| **Face Tracking** | Automatically tracks and looks at people during conversation |
-| **Look** | Move head to look in directions (left, right, up, down) |
-| **See** | Capture images through the robot's camera |
-| **Dance** | Perform expressive dance animations |
-| **Emotions** | Express emotions through movement (happy, curious, thinking, etc.) |
-| **Speak** | Voice output through the robot's speaker |
-| **Listen** | Hear through the robot's microphone |
-
-## 🖥️ Simulator Features
-
-When running with the simulator:
-
-- **3D Visualization**: Watch Clawson's movements in real-time
-- **Scene Options**: Use `--scene minimal` to add objects (apple, duck, croissant)
-- **Full SDK Compatibility**: The simulator behaves exactly like a real robot
-- **Dashboard Access**: Visit http://localhost:8000 to see the robot dashboard
-
-```bash
-# Start simulator with objects on a table
-reachy-mini-daemon --sim --scene minimal
-```
+---
 
 ## 📄 License
 
-This project is licensed under the Apache 2.0 License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the Apache 2.0 License.
 
 ## 🙏 Acknowledgments
 
-ClawBody builds on:
-
-- [Pollen Robotics](https://www.pollen-robotics.com/) - Reachy Mini robot, SDK, and simulator
-- [OpenClaw](https://github.com/openclaw/openclaw) - AI assistant framework (Clawson!)
-- [OpenAI](https://openai.com/) - Realtime API for voice I/O
-- [MuJoCo](https://mujoco.org/) - Physics simulation engine
-- [pollen-robotics/reachy_mini_conversation_app](https://huggingface.co/spaces/pollen-robotics/reachy_mini_conversation_app) - Movement and audio systems
-
-## 🤝 Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-- **This project**: [GitHub Issues](https://github.com/tomrikert/clawbody/issues)
-- **OpenClaw Skills**: Submit ClawBody as a skill to [ClawHub](https://docs.openclaw.ai/tools/clawhub)
-- **Reachy Mini Apps**: Submit to [Pollen Robotics](https://github.com/pollen-robotics)
+Built with ❤️ by the community, leveraging works from [Pollen Robotics](https://www.pollen-robotics.com/), [OpenClaw](https://github.com/openclaw/openclaw), and [OpenAI](https://openai.com/).

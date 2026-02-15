@@ -17,6 +17,7 @@ import base64
 import random
 import asyncio
 import logging
+import os
 from typing import Any, Final, Literal, Optional, Tuple
 from datetime import datetime
 
@@ -37,15 +38,27 @@ logger = logging.getLogger(__name__)
 OPENAI_SAMPLE_RATE: Final[Literal[24000]] = 24000
 
 # Base instructions for the robot body capabilities
+
+# Gesture mode
+# - natural: trigger a small, turn-level gesture at the start of each assistant response
+# - precise: attempt transcript-aligned gestures during speech
+GESTURE_MODE = os.getenv("CLAWBODY_GESTURE_MODE", "natural").strip().lower()
+# Optional timing bias (seconds) for scheduled gestures
+GESTURE_BIAS_S = float(os.getenv("CLAWBODY_GESTURE_BIAS_S", "0.0") or 0.0)
+
 ROBOT_BODY_INSTRUCTIONS = """
 ## Your Robot Body (Reachy Mini)
 You are currently embodied in a Reachy Mini robot. You have physical capabilities:
 
 **Movement Tools (use these naturally during conversation):**
 - `look` - Move head to look left, right, up, down, or front (center)
-- `emotion` - Express emotions through movement: happy, sad, surprised, curious, thinking, confused, excited
-- `dance` - Dance to celebrate or express joy
+- `emotion` - Express an emotion through movement. Accepts any string; unknown names fall back to built-in macros.
+- `dance` - Perform a dance animation. Accepts any string; uses reachy_mini_dances_library if installed, otherwise falls back to macros.
+- `capabilities` - List available dances/emotions detected at runtime (and macro fallbacks).
 - `camera` - Capture what you see through your camera
+- `face_tracking` - Enable/disable automatic face tracking
+
+**Important:** If the user asks you to "call capabilities", "list dances", or "what emotions/dances are available", call the local `capabilities` tool directly. Do NOT forward that request via `ask_openclaw`.
 
 **How to Use Your Body:**
 - Look around while thinking or to emphasize points
@@ -58,14 +71,51 @@ You are currently embodied in a Reachy Mini robot. You have physical capabilitie
 - Keep responses concise - you're speaking out loud, not typing
 - Use natural speech patterns ("hmm", "well", "let me see")
 - Be warm, personable, and conversational
+- Default to Traditional Chinese (繁體中文) unless the user speaks another language
 
-**Extended Capabilities (via ask_openclaw tool):**
-For things requiring your full capabilities, use ask_openclaw:
-- Calendar, weather, news lookups
-- Web searches
-- Smart home control
-- Accessing detailed memories
-- Any task needing external tools
+## ⚠️ CRITICAL: When to Use ask_openclaw (MANDATORY)
+
+You are the robot body, but your BRAIN lives in the cloud (OpenClaw).
+For anything beyond movement and camera, you MUST use `ask_openclaw`.
+
+**ALWAYS use ask_openclaw for:**
+- 📧 Sending emails (BaseMail, or any email)
+- 🌤️ Weather lookups
+- 📅 Calendar and schedule queries
+- 🔍 Web searches and news lookups
+- 🧠 Accessing memories (past conversations, contacts, notes)
+- 🏠 Smart home control
+- 📨 Sending messages to anyone
+- 💰 Crypto wallet, blockchain, or financial queries
+- 📝 Creating, modifying, or deleting anything (files, reminders, etc.)
+- ❓ Any factual question you're not 100% certain about
+- 🔧 Any task requiring external tools or APIs
+
+**HARD RULE — External Effects:**
+If the user asks you to DO something that produces an external effect
+(send, create, modify, delete, purchase, post, schedule, etc.),
+you MUST use `ask_openclaw` to actually execute it.
+DO NOT pretend you did it. DO NOT say "I've sent it" without calling the tool.
+DO NOT say "I can't do that" — instead, use ask_openclaw and let your cloud brain handle it.
+
+**HARD RULE — Information Queries:**
+If the user asks about weather, stock prices, news, emails, contacts, memories,
+or anything requiring real-time or stored data, you MUST use `ask_openclaw`.
+DO NOT make up answers. DO NOT say "I don't have access" — ask_openclaw DOES.
+
+**When NOT to use ask_openclaw (handle locally):**
+- Robot movement (look, emotion, dance)
+- Camera capture
+- Face tracking toggle
+- Listing capabilities (use local `capabilities` tool)
+- Simple chitchat that doesn't need external data
+- Responding to greetings
+
+**Fallback Rule:**
+If you're unsure whether you can handle something locally,
+ALWAYS default to using ask_openclaw. Say "讓我查一下" or "我問一下雲端的我"
+and call the tool. Never say "I can't do that" or "I don't have access."
+Your cloud brain (OpenClaw) has access to almost everything.
 """
 
 # Fallback if OpenClaw context fetch fails
@@ -305,7 +355,21 @@ OpenClaw has access to many capabilities you don't have directly.""",
         # Response started - robot is about to speak
         if event_type == "response.created":
             self._speaking = True
+            # Reset per-response gesture state
+            self._gesture_buffer = ""
+            self._gesture_fired = {"neg": False, "pos": False, "q": False, "shy": False}
+            self._gesture_last_t = 0.0
+            # Audio/transcript alignment state (best-effort)
+            self._audio_enqueued_s = 0.0
+            self._audio_start_t = None
+            self._transcript_total_chars = 0
+            self._pending_gestures = {}
             logger.debug("Response started")
+            if GESTURE_MODE == "natural":
+                try:
+                    await self._trigger_turn_gesture(self._last_user_message)
+                except Exception:
+                    pass
             
         # Audio output from TTS
         if event_type == "response.audio.delta":
@@ -324,11 +388,21 @@ OpenClaw has access to many capabilities you don't have directly.""",
                 dtype=np.int16
             ).reshape(1, -1)
             await self.output_queue.put((OPENAI_SAMPLE_RATE, audio_data))
+            # Track audio playback progress (approx): seconds enqueued since response start
+            try:
+                if self._audio_start_t is None:
+                    self._audio_start_t = asyncio.get_event_loop().time()
+                # audio_data is int16 mono (shape 1 x N)
+                self._audio_enqueued_s += float(audio_data.shape[-1]) / float(OPENAI_SAMPLE_RATE)
+            except Exception:
+                pass
             
-        # Response text (for logging and UI)
+        # Response text (for logging, UI, and live gesture triggers)
         if event_type == "response.audio_transcript.delta":
-            # Streaming transcript of what's being said
-            pass  # Could log incrementally if needed
+            # Streaming transcript of what's being said (while audio is playing)
+            delta = getattr(event, "transcript", None)
+            if isinstance(delta, str) and delta:
+                await self._on_assistant_transcript_delta(delta)
             
         if event_type == "response.audio_transcript.done":
             response_text = event.transcript
@@ -382,7 +456,14 @@ OpenClaw has access to many capabilities you don't have directly.""",
                 # Robot movement tools - dispatch locally
                 result = await dispatch_tool_call(tool_name, args_json, self.deps)
                 
-            logger.debug("Tool '%s' result: %s", tool_name, str(result)[:100])
+            # Log tool results at INFO when relevant (helps debugging on robot)
+            try:
+                if isinstance(result, dict) and result.get("error"):
+                    logger.warning("Tool %s error: %s", tool_name, result.get("error"))
+                elif tool_name != "ask_openclaw":
+                    logger.info("Tool %s result: %s", tool_name, str(result)[:200])
+            except Exception:
+                pass
         except Exception as e:
             logger.error("Tool '%s' failed: %s", tool_name, e)
             result = {"error": str(e)}
@@ -451,6 +532,213 @@ OpenClaw has access to many capabilities you don't have directly.""",
             logger.error("OpenClaw query failed: %s", e)
             return {"error": str(e)}
             
+
+    async def _trigger_turn_gesture(self, user_text: str | None) -> None:
+        """Trigger a small, natural gesture at the start of a response.
+
+        Turn-level (not word-aligned): should feel conversational.
+        """
+        if not user_text:
+            return
+        t = str(user_text)
+
+        # Greetings -> friendly wave-ish
+        if any(k.lower() in t.lower() for k in ["哈囉", "你好", "嗨", "hello", "hi", "안녕"]):
+            await self._queue_headlook_sequence(["right", "left", "front"], [0.22, 0.22, 0.45])
+            return
+
+        # Weather -> look up
+        if any(k in t for k in ["天氣", "下雨", "溫度", "幾度", "氣象", "晴", "陰", "風"]):
+            await self._queue_headlook_sequence(["up", "front"], [0.35, 0.65])
+            return
+
+        # News/accidents -> look down (serious)
+        if any(k in t for k in ["新聞", "車禍", "死亡", "受傷", "意外", "災", "地震", "火災"]):
+            await self._queue_headlook_sequence(["down", "front"], [0.45, 0.75])
+            return
+
+        # Yes/no questions -> curious glance
+        if ("?" in t) or ("？" in t) or t.strip().endswith(("嗎", "呢")) or any(k in t for k in ["是不是", "會不會", "可不可以"]):
+            await self._queue_headlook_sequence(["right", "front"], [0.30, 0.55])
+            return
+
+        # Thanks -> nod
+        if any(k.lower() in t.lower() for k in ["謝", "thanks", "thx"]):
+            await self._queue_headlook_sequence(["down", "up", "front"], [0.22, 0.22, 0.45])
+            return
+
+        # Default tiny alive motion
+        return
+
+
+    # ------------------------------------------------------------------
+    # Live gesture triggers (Phase 1)
+    # ------------------------------------------------------------------
+
+    async def _on_assistant_transcript_delta(self, delta: str) -> None:
+        """Called as the assistant is speaking (streaming transcript).
+
+        We keep voice streaming uninterrupted, and queue small head gestures
+        in parallel based on language cues.
+
+        Timing note:
+        Transcript deltas may arrive ahead of audio playback. We therefore
+        schedule gestures based on transcript position aligned to audio
+        playback progress (best-effort).
+        """
+        # Lazy-init per-response state
+        if not hasattr(self, "_gesture_buffer"):
+            self._gesture_buffer = ""
+            self._gesture_fired = {"neg": False, "pos": False, "q": False, "shy": False}
+            self._gesture_last_t = 0.0
+
+        if not hasattr(self, "_transcript_total_chars"):
+            self._transcript_total_chars = 0
+        if not hasattr(self, "_pending_gestures"):
+            self._pending_gestures = {}
+
+        self._gesture_buffer += delta
+        self._transcript_total_chars += len(delta)
+
+        # Cooldown to avoid machine-gun gestures
+        now = asyncio.get_event_loop().time()
+        if now - float(getattr(self, "_gesture_last_t", 0.0)) < 0.45:
+            return
+
+        buf = self._gesture_buffer
+        tail = buf[-48:]
+
+        def contains_any(s: str, words: list[str]) -> str | None:
+            for w in words:
+                if w in s:
+                    return w
+            return None
+
+        # 1) Shy / hide face
+        if (not self._gesture_fired["shy"]):
+            hit = contains_any(tail, ["害羞", "不好意思", "別看", "不要看", "好害羞"])
+            if hit:
+                idx = buf.rfind(hit)
+                await self._schedule_gesture_at_char("shy", idx, ["down", "front"], [0.8, 1.0])
+                self._gesture_fired["shy"] = True
+                self._gesture_last_t = now
+                return
+
+        # 2) Negative -> shake head
+        if (not self._gesture_fired["neg"]):
+            hit = contains_any(tail, ["不是", "不對", "不行", "沒有", "別", "不要", "不可以", "不是喔", "不是這樣"])
+            if hit:
+                idx = buf.rfind(hit)
+                await self._schedule_gesture_at_char(
+                    "neg",
+                    idx,
+                    ["left", "right", "left", "right", "left", "front"],
+                    [0.22, 0.22, 0.22, 0.22, 0.22, 0.35],
+                )
+                self._gesture_fired["neg"] = True
+                self._gesture_last_t = now
+                return
+
+        # 3) Positive -> nod
+        if (not self._gesture_fired["pos"]):
+            hit = contains_any(tail, ["沒錯", "對", "可以", "好", "好的", "行", "同意"])
+            if hit:
+                idx = buf.rfind(hit)
+                await self._schedule_gesture_at_char(
+                    "pos",
+                    idx,
+                    ["down", "up", "down", "up", "front"],
+                    [0.22, 0.22, 0.22, 0.22, 0.40],
+                )
+                self._gesture_fired["pos"] = True
+                self._gesture_last_t = now
+                return
+
+
+        # 4) Explicit stage directions (when user says the word)
+        # These are common in Mandarin prompts: "點頭"/"搖頭"/"彈跳"/"搖擺".
+        if True:
+            hit = contains_any(tail, ["搖頭", "點頭", "彈跳", "跳起來", "搖擺", "搖晃", "左右搖", "擺動"])
+            if hit:
+                idx = buf.rfind(hit)
+                if "搖頭" in hit:
+                    await self._schedule_gesture_at_char(
+                        "dir_shake",
+                        idx,
+                        ["left", "right", "left", "right", "left", "front"],
+                        [0.22, 0.22, 0.22, 0.22, 0.22, 0.35],
+                    )
+                    self._gesture_last_t = now
+                    return
+                if "點頭" in hit:
+                    await self._schedule_gesture_at_char(
+                        "dir_nod",
+                        idx,
+                        ["down", "up", "down", "up", "front"],
+                        [0.22, 0.22, 0.22, 0.22, 0.40],
+                    )
+                    self._gesture_last_t = now
+                    return
+                if hit in ["彈跳", "跳起來"]:
+                    await self._schedule_gesture_at_char(
+                        "dir_bounce",
+                        idx,
+                        ["down", "up", "down", "front"],
+                        [0.20, 0.20, 0.20, 0.35],
+                    )
+                    self._gesture_last_t = now
+                    return
+                # body sway is a tool, but our scheduler currently queues headlook.
+                # We approximate with a head sway for now; body_sway can be invoked explicitly by user.
+                if hit in ["搖擺", "搖晃", "左右搖", "擺動"]:
+                    await self._schedule_gesture_at_char(
+                        "dir_sway",
+                        idx,
+                        ["right", "left", "right", "front"],
+                        [0.22, 0.22, 0.22, 0.45],
+                    )
+                    self._gesture_last_t = now
+                    return
+
+        # 4) Question -> tilt-ish (gentle side glance)
+        if (not self._gesture_fired["q"]):
+            # Trigger at the most recent question marker.
+            qpos = max(buf.rfind("?"), buf.rfind("？"))
+            if qpos != -1 or tail.endswith("嗎") or tail.endswith("呢"):
+                idx = qpos if qpos != -1 else (len(buf) - 1)
+                await self._schedule_gesture_at_char(
+                    "q",
+                    idx,
+                    ["right", "left", "right", "front"],
+                    [0.22, 0.22, 0.22, 0.45],
+                )
+                self._gesture_fired["q"] = True
+                self._gesture_last_t = now
+                return
+
+    async def _queue_headlook_sequence(self, directions: list[str], durations: list[float]) -> None:
+        """Queue a short sequence of HeadLookMove moves."""
+        from reachy_mini_openclaw.moves import HeadLookMove
+
+        if not getattr(self.deps, "robot", None):
+            return
+
+        for i, direction in enumerate(directions):
+            duration = durations[i] if i < len(durations) else durations[-1]
+            try:
+                _, current_ant = self.deps.robot.get_current_joint_positions()
+                current_head = self.deps.robot.get_current_head_pose()
+                move = HeadLookMove(
+                    direction=direction,
+                    start_pose=current_head,
+                    start_antennas=tuple(current_ant),
+                    duration=float(duration),
+                )
+                self.deps.movement_manager.queue_move(move)
+            except Exception:
+                # If pose read fails, skip gracefully
+                return
+
     async def receive(self, frame: Tuple[int, NDArray]) -> None:
         """Receive audio from the robot microphone."""
         if not self.connection:

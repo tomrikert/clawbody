@@ -95,6 +95,26 @@ def launch_gradio(
         except Exception as e:
             return f"Error: {e}"
     
+    def shutdown_app():
+        """Shutdown the entire application process."""
+        import os
+        import time
+        
+        logger.warning("Shutdown requested via Web UI")
+        
+        # Stop conversation if running
+        stop_conversation()
+        
+        # Schedule process exit
+        def force_exit():
+            time.sleep(1.0)
+            os._exit(0)
+            
+        import threading
+        threading.Thread(target=force_exit, daemon=True).start()
+        
+        return "Application is shutting down. You can close this tab."
+    
     def apply_profile(profile_name):
         """Apply a personality profile."""
         set_custom_profile(profile_name if profile_name else None)
@@ -119,6 +139,7 @@ def launch_gradio(
             with gr.Row():
                 start_btn = gr.Button("▶️ Start", variant="primary")
                 stop_btn = gr.Button("⏹️ Stop", variant="secondary")
+                shutdown_btn = gr.Button("🛑 Shutdown App", variant="stop")
             
             status_text = gr.Textbox(label="Status", interactive=False)
             
@@ -126,6 +147,7 @@ def launch_gradio(
             
             start_btn.click(start_conversation, outputs=[status_text])
             stop_btn.click(stop_conversation, outputs=[status_text])
+            shutdown_btn.click(shutdown_app, outputs=[status_text])
         
         with gr.Tab("Personality"):
             profiles = get_available_profiles()
