@@ -197,6 +197,20 @@ reachy-mini-daemon --sim
 clawbody --gradio
 ```
 
+### On a Physical Reachy Mini Robot
+
+```bash
+# SSH into the robot
+ssh pollen@reachy-mini.local
+
+# Clone the repository
+git clone https://github.com/dAAAb/clawbody
+cd clawbody
+
+# Install in the apps virtual environment
+/venvs/apps_venv/bin/pip install -e .
+```
+
 ## ⚙️ Configuration
 
 1. Copy the example environment file:

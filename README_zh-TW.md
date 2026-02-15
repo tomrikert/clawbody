@@ -97,6 +97,20 @@ cp .env.example .env
 clawbody --gradio
 ```
 
+### 在實體 Reachy Mini 機器人上安裝
+
+```bash
+# 使用 SSH 登入機器人
+ssh pollen@reachy-mini.local
+
+# 複製儲存庫
+git clone https://github.com/dAAAb/clawbody
+cd clawbody
+
+# 在 apps 虛擬環境中安裝
+/venvs/apps_venv/bin/pip install -e .
+```
+
 ---
 
 ## 🛠️ 機器人能力 (Capabilities)
