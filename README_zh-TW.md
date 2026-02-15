@@ -1,150 +1,105 @@
 # 🦞🤖 ClawBody (優化版)
 
-**為您的 OpenClaw AI 代理提供實體機器人身體！**
+**為您的 OpenClaw AI 代理提供具有表現力的具身實體！**
 
 [English Version](README.md)
 
-ClawBody 將 OpenClaw 的 AI 智慧與 Reachy Mini 的表現力機器人身體相結合，利用 OpenAI 的 Realtime API 實現超靈敏的語音對話。您的 OpenClaw 助手 (Clawson) 現在可以在現實世界中看、聽、說與移動。
+ClawBody 彌合了高層級 AI 智慧 (OpenClaw) 與底層機器人控制 (Reachy Mini) 之間的鴻溝。透過利用 OpenAI 的 Realtime API，它建立了一個超低延遲的語音對話循環，讓您的 AI 助手 Clawson 能夠在現實世界中看、聽並以物理方式表達情感。
 
 ![Reachy Mini Dance](https://huggingface.co/spaces/pollen-robotics/reachy_mini_conversation_app/resolve/main/docs/assets/reachy_mini_dance.gif)
 
 ---
 
-## 🌟 最新更新 (過去 24 小時)
+## 🚀 重大技術更新 (2026年2月)
 
-- **🎭 動態情感與舞蹈庫**：整合了 Reachy 守護程序 (daemon) 記錄的所有情感與舞蹈，讓機器人更具表現力。
-- **👋 自然回合級手勢 (Natural Gestures)**：新增了隨對話自動觸發的自然手勢，讓互動更像人類。
-- **🗣️ 語音同步動作**：手勢現在會與語音同步，並加入了身體搖擺 (body_sway) 效果。
-- **🎯 關鍵字觸發手勢**：可以根據特定的關鍵字觸發特定的手勢動作。
-- **🔗 連線優化**：修復了 OpenClaw 的 CORS 連線問題，並優化了 MediaPipe 追蹤數據格式。
+本專案近期進行了顯著的架構升級，旨在強化「具身智慧 (Embodied Intelligence)」：
 
----
-
-## 👁️ 核心功能：人臉追蹤與眼神接觸
-
-**機器人在你說話時會看著你！**
-
-ClawBody 包含即時人臉追蹤功能，使對話感覺自然且引人入勝：
-
-- **自動人臉檢測**：使用 MediaPipe 或 YOLO 以 25Hz 檢測人臉。
-- **平滑頭部追蹤**：當您移動時，機器人會平滑地跟隨您的臉。
-- **自然眼神接觸**：在對話期間保持參與感。
-
-```bash
-# 預設啟動人臉追蹤
-clawbody
-
-# 選擇追蹤器（MediaPipe 較輕量，YOLO 更準確）
-clawbody --head-tracker mediapipe
-```
+- **自然具身表現 (Natural Embodiment)**：引入了 **「轉向級自然手勢 (Natural Turn-Level Gestures)」** 與 **「語音同步身體搖擺 (Speech-Synced Body Sway)」**。機器人在說話時不再僵硬，而是會根據對話的節奏與情緒進行流暢的物理律動。
+- **動態能力發現 (Dynamic Capability Discovery)**：全新的 **「能力註冊機制 (Capability Registry)」** 會自動掃描 Reachy daemon 中所有預錄的情感與舞蹈。這使得 AI 能夠在不修改代碼的情況下，自動發現並運用機器人的新行為。
+- **上下文感知觸發 (Context-Aware Triggers)**：新增 **「關鍵字手勢 (Cue Word Gestures)」** 支援。機器人現在能根據即時逐字稿中檢測到的特定詞彙，精準地觸發對應的動作。
+- **感知優化**：優化了 MediaPipe 追蹤數據格式，並解決了 OpenClaw Gateway 的 CORS 連線問題，確保即時視覺循環更加穩定。
 
 ---
 
-## 🎮 無硬體？沒問題！
+## ✨ 核心特色
 
-**您不需要實體 Reachy Mini 機器人即可使用 ClawBody！**
+- **👁️ 智慧眼神接觸**：25Hz 即時人臉追蹤 (MediaPipe/YOLO)，確保機器人始終與使用者保持互動感。
+- **🎭 表現力手勢**：自動化手勢與語音輸出同步，包含用於強調語氣的「誇張宏觀手勢」。
+- **🧠 OpenClaw 深度整合**：透過實體人格化身，完整調用 OpenClaw 工具（行事曆、智慧家居、網頁搜索）。
+- **💃 情感引擎**：可動態觸發圖書館中任何預錄的情感或舞蹈。
+- **🎤 低延遲語音**：由 OpenAI Realtime API 驅動，實現如人類般的自然反應速度。
+- **🖥️ 模擬器優先**：完整支援 MuJoCo 模擬，無需實體硬體即可進行開發。
 
-ClawBody 可與 [Reachy Mini 模擬器](https://huggingface.co/docs/reachy_mini/platforms/simulation/get_started) 配合使用。這是一個基於 MuJoCo 的物理模擬，可以在您的電腦上運行。
+---
 
-```bash
-# 安裝模擬器支援
-pip install "reachy-mini[mujoco]"
+## 🏗️ 系統架構
 
-# 啟動模擬器 (會開啟 3D 視窗)
-# Mac 使用者請用: mjpython -m reachy_mini.daemon.app.main --sim
-reachy-mini-daemon --sim
-
-# 在另一個終端機執行 ClawBody
-clawbody --gradio
-```
+ClawBody 作為以下三大系統的協調者：
+1. **OpenAI Realtime API**：處理音訊流並生成低延遲回覆。
+2. **OpenClaw Gateway**：提供人格、記憶與工具調用能力的「大腦」。
+3. **Reachy Mini SDK/Daemon**：控制機器人伺服馬達與感測器的「神經系統」。
 
 ---
 
 ## 🚀 快速開始
 
-### 1. 安裝環境
+### 基本需求
+- Python 3.11+
+- [Reachy Mini SDK](https://github.com/pollen-robotics/reachy_mini)
+- [OpenClaw Gateway](https://github.com/openclaw/openclaw)
+- OpenAI API 金鑰 (需具備 Realtime API 權限)
+
+### 選項 A：模擬器安裝步驟
 
 ```bash
-# 複製儲存庫
 git clone https://github.com/dAAAb/clawbody
 cd clawbody
-
-# 建立並啟動虛擬環境
-python -m venv .venv
-source .venv/bin/activate
-
-# 安裝 ClawBody 及其依賴
+python -m venv .venv && source .venv/bin/activate
 pip install -e ".[mediapipe_vision]"
-```
+pip install "reachy-mini[mujoco]"
 
-### 2. 配置設定
-
-複製環境變數範本並填入您的金鑰：
-
-```bash
+# 配置 .env 環境變數
 cp .env.example .env
-```
 
-編輯 `.env`：
-- `OPENAI_API_KEY`: 您的 OpenAI API Key (需支援 Realtime API)
-- `OPENCLAW_GATEWAY_URL`: OpenClaw Gateway 的網址 (例如 `http://localhost:18789`)
-- `OPENCLAW_TOKEN`: 您的 OpenClaw Token
+# 終端機 1：啟動模擬器
+reachy-mini-daemon --sim
 
-### 3. 執行
-
-```bash
-# 使用模擬器時，建議搭配 --gradio 開啟網頁介面
+# 終端機 2：執行 ClawBody
 clawbody --gradio
 ```
 
-### 在實體 Reachy Mini 機器人上安裝
+### 選項 B：實體機器人安裝步驟
 
 ```bash
-# 使用 SSH 登入機器人
+# SSH 登入機器人
 ssh pollen@reachy-mini.local
 
-# 複製儲存庫
+# 在 app 環境中複製並安裝
 git clone https://github.com/dAAAb/clawbody
 cd clawbody
-
-# 在 apps 虛擬環境中安裝
 /venvs/apps_venv/bin/pip install -e .
+
+# 直接在硬體上執行
+clawbody
 ```
 
 ---
 
-## 🛠️ 機器人能力 (Capabilities)
+## 🛠️ 機器人能力 (AI 可調用)
 
-ClawBody 賦予 Clawson 以下實體能力：
-
-| 能力 | 描述 |
-|------------|-------------|
-| **人臉追蹤** | 對話時自動追蹤並注視人類 |
-| **視覺 (See)** | 通過機器人鏡頭捕捉影像並描述環境 |
-| **情感 (Emotions)** | 執行預錄的情感動作（如：好奇、快樂、思考） |
-| **手勢 (Gestures)** | 與語音同步的自然手勢，增強對話表現力 |
-| **舞蹈 (Dance)** | 執行表現力豐富的舞蹈動畫 |
-
----
-
-## 🤝 貢獻指南
-
-我們歡迎任何形式的貢獻！如果您有新功能的想法或發現 Bug，請提交 Pull Request 或建立 Issue。
-
-- **提交 Issue**：報告錯誤或提出新功能建議。
-- **Pull Request**：請確保代碼風格一致並通過測試。
+| 能力 | 技術細節 |
+|------------|-------------------|
+| **自然手勢** | 根據逐字稿變動量同步觸發轉向級動作 |
+| **情感註冊** | 自動掃描並註冊 daemon 中預錄的表情 |
+| **人臉追蹤** | 使用 25Hz 視覺數據進行 PID 控制的頭部運動 |
+| **視覺描述** | 捕捉畫面並利用 GPT-4o-mini 進行場景理解 |
 
 ---
 
 ## 📄 授權資訊
 
-本專案採用 Apache 2.0 授權 - 詳見 [LICENSE](LICENSE) 檔案。
-
----
+本專案採用 Apache 2.0 授權。
 
 ## 🙏 致謝
 
-本專案建立在以下優秀作品之上：
-- [Pollen Robotics](https://www.pollen-robotics.com/) (Reachy Mini)
-- [OpenClaw](https://github.com/openclaw/openclaw) (AI 助手框架)
-- [OpenAI Realtime API](https://openai.com/)
+由社群用心打造，特別感謝 [Pollen Robotics](https://www.pollen-robotics.com/)、[OpenClaw](https://github.com/openclaw/openclaw) 與 [OpenAI](https://openai.com/) 的技術支持。
