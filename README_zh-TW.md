@@ -32,7 +32,7 @@ clawbody --gradio
 
 **實體機器人環境：**
 ```bash
-/venvs/apps_venv/bin/clawbody
+/venvs/apps_venv/bin/clawbody --gradio
 ```
 
 ---
@@ -72,21 +72,21 @@ git clone https://github.com/dAAAb/clawbody
 cd clawbody
 /venvs/apps_venv/bin/pip install -e .
 
-# 使用該環境的 bin 直接在硬體上執行
-/venvs/apps_venv/bin/clawbody
+# 使用該環境的 bin 直接在硬體上執行 (建議開啟 --gradio)
+/venvs/apps_venv/bin/clawbody --gradio
 ```
 
 ---
 
 ## 🤖 自動化與背景執行 (Automation)
 
-在實體 Reachy Mini 上，您可以將 ClawBody 註冊為受管理的服務，使用 `reachy-mini-daemon` 工具使其在機器人開機時自動啟動。
+在實體 Reachy Mini 上，您可以將 ClawBody 註冊為受管理的服務。**強烈建議在註冊時加入 `--gradio` 參數，以便進行遠端管理。**
 
 ### 1. 註冊應用程式
-在機器人終端機執行以下指令（使用絕對路徑）。這會告知 daemon 程式碼的位置以及如何讀取 `.env`：
+在機器人終端機執行以下指令。請注意使用 `--args "--gradio"` 來開啟網頁介面功能：
 
 ```bash
-/venvs/apps_venv/bin/reachy-mini-daemon app register clawbody --path /home/pollen/clawbody
+/venvs/apps_venv/bin/reachy-mini-daemon app register clawbody --path /home/pollen/clawbody --args "--gradio"
 ```
 
 ### 2. 設定開機自啟動
@@ -106,10 +106,10 @@ cd clawbody
 
 ## 🛑 遠端停止服務 (不需要 SSH)
 
-為了方便管理實體機器人，我們提供了兩種無需進入終端機即可停止服務的方法：
+要使用以下功能，請確保 App 在啟動時帶有 `--gradio` 參數（詳見自動化章節）。
 
 ### 1. 網頁介面停止 (Gradio)
-如果您在執行時啟動了 `--gradio`，您可以透過瀏覽器訪問 `http://reachy-mini.local:7860`：
+透過瀏覽器訪問 `http://reachy-mini.local:7860`：
 - 點擊 **「🛑 Shutdown App」** 按鈕。
 - 這會完全終止背景的 Python 進程。
 

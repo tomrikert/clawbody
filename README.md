@@ -65,7 +65,7 @@ clawbody --gradio
 
 **For physical robot setup:**
 ```bash
-/venvs/apps_venv/bin/clawbody
+/venvs/apps_venv/bin/clawbody --gradio
 ```
 
 ---
@@ -105,21 +105,21 @@ git clone https://github.com/dAAAb/clawbody
 cd clawbody
 /venvs/apps_venv/bin/pip install -e .
 
-# Run directly on hardware
-/venvs/apps_venv/bin/clawbody
+# Run directly on hardware (with Gradio enabled)
+/venvs/apps_venv/bin/clawbody --gradio
 ```
 
 ---
 
 ## 🤖 Automation & Background Service
 
-On a physical Reachy Mini, you can register ClawBody as a managed service using the `reachy-mini-daemon` tool so it starts automatically when the robot boots up.
+On a physical Reachy Mini, you can register ClawBody as a managed service using the `reachy-mini-daemon` tool so it starts automatically when the robot boots up. **We recommend enabling `--gradio` for remote management.**
 
 ### 1. Register the Application
-Run this command from any directory. It tells the daemon where to find your app and its `.env` file:
+Run this command from any directory. Note the use of `--args "--gradio"` to enable the web UI:
 
 ```bash
-/venvs/apps_venv/bin/reachy-mini-daemon app register clawbody --path /home/pollen/clawbody
+/venvs/apps_venv/bin/reachy-mini-daemon app register clawbody --path /home/pollen/clawbody --args "--gradio"
 ```
 
 ### 2. Enable Auto-start on Boot
@@ -139,10 +139,10 @@ Run this command from any directory. It tells the daemon where to find your app 
 
 ## 🛑 Remote Shutdown (No SSH Required)
 
-For easier management on physical robots, you can stop the service without using the terminal:
+To use these features, ensure the app was started with the `--gradio` flag (see Automation section).
 
 ### 1. Web UI Shutdown (Gradio)
-If running with `--gradio`, access the UI at `http://reachy-mini.local:7860`:
+Access the UI at `http://reachy-mini.local:7860`:
 - Click the **"🛑 Shutdown App"** button.
 - This will completely terminate the background Python process.
 
