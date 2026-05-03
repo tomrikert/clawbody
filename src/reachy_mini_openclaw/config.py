@@ -18,12 +18,34 @@ load_dotenv(_project_root / ".env")
 @dataclass
 class Config:
     """Application configuration loaded from environment variables."""
-    
+
+    # AI Provider Configuration
+    # Options: "openai" (OpenAI Realtime) or "local" (local STT + Ollama + local TTS)
+    AI_PROVIDER: str = field(default_factory=lambda: os.getenv("AI_PROVIDER", "openai").lower())
+
     # OpenAI Configuration
     OPENAI_API_KEY: str = field(default_factory=lambda: os.getenv("OPENAI_API_KEY", ""))
     OPENAI_MODEL: str = field(default_factory=lambda: os.getenv("OPENAI_MODEL", "gpt-realtime-1.5"))
     OPENAI_VOICE: str = field(default_factory=lambda: os.getenv("OPENAI_VOICE", "cedar"))
-    
+
+    # Local AI Configuration
+    LOCAL_LLM_BASE_URL: str = field(default_factory=lambda: os.getenv("LOCAL_LLM_BASE_URL", "http://127.0.0.1:11434"))
+    LOCAL_LLM_MODEL: str = field(default_factory=lambda: os.getenv("LOCAL_LLM_MODEL", "gemma4:latest"))
+    LOCAL_LLM_THINK: bool = field(default_factory=lambda: os.getenv("LOCAL_LLM_THINK", "false").lower() == "true")
+    LOCAL_LLM_TIMEOUT: float = field(default_factory=lambda: float(os.getenv("LOCAL_LLM_TIMEOUT", "120")))
+    LOCAL_STT_MODEL: str = field(default_factory=lambda: os.getenv("LOCAL_STT_MODEL", "large-v3-turbo"))
+    LOCAL_STT_DEVICE: str = field(default_factory=lambda: os.getenv("LOCAL_STT_DEVICE", "cpu"))
+    LOCAL_STT_COMPUTE_TYPE: str = field(default_factory=lambda: os.getenv("LOCAL_STT_COMPUTE_TYPE", "int8"))
+    LOCAL_TTS_ENGINE: str = field(default_factory=lambda: os.getenv("LOCAL_TTS_ENGINE", "kokoro").lower())
+    LOCAL_TTS_LANG: str = field(default_factory=lambda: os.getenv("LOCAL_TTS_LANG", "a"))
+    LOCAL_TTS_VOICE: str = field(default_factory=lambda: os.getenv("LOCAL_TTS_VOICE", "af_heart"))
+    LOCAL_TTS_SPEED: float = field(default_factory=lambda: float(os.getenv("LOCAL_TTS_SPEED", "1.0")))
+    LOCAL_VAD_THRESHOLD: float = field(default_factory=lambda: float(os.getenv("LOCAL_VAD_THRESHOLD", "0.015")))
+    LOCAL_VAD_SILENCE_MS: int = field(default_factory=lambda: int(os.getenv("LOCAL_VAD_SILENCE_MS", "700")))
+    LOCAL_MIN_SPEECH_MS: int = field(default_factory=lambda: int(os.getenv("LOCAL_MIN_SPEECH_MS", "250")))
+    LOCAL_MAX_HISTORY_MESSAGES: int = field(default_factory=lambda: int(os.getenv("LOCAL_MAX_HISTORY_MESSAGES", "12")))
+    LOCAL_VISION_LLM_MODEL: str = field(default_factory=lambda: os.getenv("LOCAL_VISION_LLM_MODEL", os.getenv("LOCAL_LLM_MODEL", "gemma4:latest")))
+
     # OpenClaw Gateway Configuration
     OPENCLAW_GATEWAY_URL: str = field(default_factory=lambda: os.getenv("OPENCLAW_GATEWAY_URL", "ws://localhost:18789"))
     OPENCLAW_TOKEN: Optional[str] = field(default_factory=lambda: os.getenv("OPENCLAW_TOKEN"))
@@ -56,7 +78,9 @@ class Config:
     def validate(self) -> list[str]:
         """Validate configuration and return list of errors."""
         errors = []
-        if not self.OPENAI_API_KEY:
+        if self.AI_PROVIDER not in {"openai", "local"}:
+            errors.append("AI_PROVIDER must be 'openai' or 'local'")
+        if self.AI_PROVIDER == "openai" and not self.OPENAI_API_KEY:
             errors.append("OPENAI_API_KEY is required")
         return errors
 

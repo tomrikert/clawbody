@@ -112,7 +112,7 @@ def launch_gradio(
         # 🤖 Reachy Mini OpenClaw
         
         Give your OpenClaw AI agent a physical presence with Reachy Mini.
-        Using OpenAI Realtime API for responsive voice conversation.
+        Using the configured voice provider for responsive conversation.
         """)
         
         with gr.Tab("Conversation"):
@@ -163,8 +163,12 @@ def launch_gradio(
             gr.Markdown(f"""
             ### Current Configuration
             
+            - **AI Provider**: {config.AI_PROVIDER}
             - **OpenClaw Gateway**: {gateway_url}
             - **OpenAI Model**: {config.OPENAI_MODEL}
+            - **Local LLM Model**: {config.LOCAL_LLM_MODEL}
+            - **Local STT Model**: {config.LOCAL_STT_MODEL}
+            - **Local TTS Engine**: {config.LOCAL_TTS_ENGINE}
             - **Voice**: {config.OPENAI_VOICE}
             - **Camera Enabled**: {enable_camera}
             - **OpenClaw Enabled**: {enable_openclaw}
@@ -180,7 +184,7 @@ def launch_gradio(
             
             This application combines:
             
-            - **OpenAI Realtime API** for ultra-low-latency voice conversation
+            - **OpenAI Realtime API or local AI** for voice conversation
             - **OpenClaw Gateway** for extended AI capabilities (web, calendar, smart home, etc.)
             - **Reachy Mini Robot** for physical embodiment with expressive movements
             
@@ -197,6 +201,7 @@ def launch_gradio(
             - [Reachy Mini SDK](https://github.com/pollen-robotics/reachy_mini)
             - [OpenClaw](https://github.com/openclaw/openclaw)
             - [OpenAI Realtime API](https://platform.openai.com/docs/guides/realtime)
+            - [Ollama](https://ollama.com/)
             """)
     
     demo.launch(share=share, server_name="0.0.0.0", server_port=7860)

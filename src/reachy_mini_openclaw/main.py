@@ -24,9 +24,12 @@ import logging
 import argparse
 import threading
 from pathlib import Path
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from dotenv import load_dotenv
+
+if TYPE_CHECKING:
+    from reachy_mini import ReachyMini
 
 # Load environment from project root (override=True ensures .env takes precedence)
 _project_root = Path(__file__).parent.parent.parent
@@ -122,6 +125,11 @@ Examples:
         help="Enable local vision processing with SmolVLM2"
     )
     parser.add_argument(
+        "--local-ai",
+        action="store_true",
+        help="Use local AI pipeline (faster-whisper + Ollama + Kokoro) instead of OpenAI Realtime"
+    )
+    parser.add_argument(
         "--profile",
         type=str,
         help="Custom personality profile to use"
@@ -146,6 +154,8 @@ class ClawBodyCore:
         robot_name: Optional[str] = None,
         enable_camera: bool = True,
         enable_openclaw: bool = True,
+        enable_face_tracking: Optional[bool] = None,
+        head_tracker_type: Optional[str] = None,
         robot: Optional["ReachyMini"] = None,
         external_stop_event: Optional[threading.Event] = None,
     ):
@@ -156,6 +166,8 @@ class ClawBodyCore:
             robot_name: Optional robot name for connection
             enable_camera: Whether to enable camera functionality
             enable_openclaw: Whether to enable OpenClaw integration
+            enable_face_tracking: Optional override for face tracking
+            head_tracker_type: Optional override for tracker type
             robot: Optional pre-initialized robot (for app framework)
             external_stop_event: Optional external stop event
         """
@@ -165,7 +177,6 @@ class ClawBodyCore:
         from reachy_mini_openclaw.audio.head_wobbler import HeadWobbler
         from reachy_mini_openclaw.openclaw_bridge import OpenClawBridge
         from reachy_mini_openclaw.tools.core_tools import ToolDependencies
-        from reachy_mini_openclaw.openai_realtime import OpenAIRealtimeHandler
         
         self.gateway_url = gateway_url
         self._external_stop_event = external_stop_event
@@ -226,8 +237,10 @@ class ClawBodyCore:
             from reachy_mini_openclaw.camera_worker import CameraWorker
             
             # Initialize head tracker for local face tracking
-            if config.ENABLE_FACE_TRACKING:
-                self.head_tracker = self._initialize_head_tracker(config.HEAD_TRACKER_TYPE)
+            tracking_enabled = config.ENABLE_FACE_TRACKING if enable_face_tracking is None else enable_face_tracking
+            tracker = head_tracker_type or config.HEAD_TRACKER_TYPE
+            if tracking_enabled:
+                self.head_tracker = self._initialize_head_tracker(tracker)
             
             # Initialize camera worker with head tracker
             self.camera_worker = CameraWorker(
@@ -252,15 +265,69 @@ class ClawBodyCore:
             vision_manager=self.vision_manager,
         )
         
-        # Initialize OpenAI Realtime handler with OpenClaw bridge
-        self.handler = OpenAIRealtimeHandler(
-            deps=self.deps,
-            openclaw_bridge=self.openclaw_bridge,
-        )
+        # Initialize voice handler
+        if config.AI_PROVIDER == "local":
+            from reachy_mini_openclaw.local_voice import LocalVoiceHandler
+
+            logger.info("Using local AI provider")
+            self.handler = LocalVoiceHandler(
+                deps=self.deps,
+                openclaw_bridge=self.openclaw_bridge,
+            )
+            handler_task_name = "local-voice-handler"
+        else:
+            from reachy_mini_openclaw.openai_realtime import OpenAIRealtimeHandler
+
+            logger.info("Using OpenAI Realtime provider")
+            self.handler = OpenAIRealtimeHandler(
+                deps=self.deps,
+                openclaw_bridge=self.openclaw_bridge,
+            )
+            handler_task_name = "openai-handler"
+        self._handler_task_name = handler_task_name
         
         # State
         self._stop_event = asyncio.Event()
         self._tasks: list[asyncio.Task] = []
+
+    async def _wait_for_voice_ready(
+        self,
+        handler_task: asyncio.Task,
+        timeout: float = 90.0,
+    ) -> None:
+        """Wait until the selected voice handler can accept audio."""
+        ready_event = getattr(self.handler, "_ready", None)
+        if ready_event is None:
+            ready_event = getattr(self.handler, "_connected_event", None)
+
+        if ready_event is None:
+            return
+
+        ready_task = asyncio.create_task(ready_event.wait(), name="voice-ready-wait")
+        try:
+            done, _pending = await asyncio.wait(
+                {ready_task, handler_task},
+                timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            if handler_task in done:
+                exc = handler_task.exception()
+                if exc is not None:
+                    raise exc
+                logger.warning("Voice handler exited before reporting ready")
+                return
+
+            if ready_task in done:
+                return
+
+            logger.warning(
+                "Voice handler not ready after %.0f seconds; starting audio anyway",
+                timeout,
+            )
+        finally:
+            if not ready_task.done():
+                ready_task.cancel()
         
     def _initialize_vision_manager(self) -> Optional[Any]:
         """Initialize local vision processor (SmolVLM2).
@@ -438,6 +505,11 @@ class ClawBodyCore:
             logger.info("Starting local vision processor...")
             self.vision_manager.start()
         
+        # Start voice handler before audio so readiness logs reflect real availability.
+        logger.info("Starting voice handler...")
+        handler_task = asyncio.create_task(self.handler.start_up(), name=self._handler_task_name)
+        await self._wait_for_voice_ready(handler_task)
+
         # Start audio
         logger.info("Starting audio...")
         self.robot.media.start_recording()
@@ -445,9 +517,6 @@ class ClawBodyCore:
         time.sleep(1)  # Let pipelines initialize
         
         logger.info("Ready! Speak to me...")
-        
-        # Start OpenAI handler in background
-        handler_task = asyncio.create_task(self.handler.start_up(), name="openai-handler")
         
         # Start audio loops
         self._tasks = [
@@ -470,6 +539,12 @@ class ClawBodyCore:
         for task in self._tasks:
             if not task.done():
                 task.cancel()
+
+        # Stop voice handler
+        try:
+            asyncio.get_event_loop().run_until_complete(self.handler.shutdown())
+        except Exception as e:
+            logger.debug("Voice handler shutdown: %s", e)
                 
         # Stop movement system
         self.head_wobbler.stop()
@@ -550,11 +625,14 @@ def main() -> None:
         from reachy_mini_openclaw.config import set_custom_profile
         set_custom_profile(args.profile)
     
-    # Configure face tracking and local vision from args
+    # Configure provider, face tracking, and local vision from args
     from reachy_mini_openclaw.config import (
+        config,
         set_face_tracking_enabled, 
         set_local_vision_enabled,
     )
+    if args.local_ai:
+        config.AI_PROVIDER = "local"
     if args.no_face_tracking:
         set_face_tracking_enabled(False)
     if args.local_vision:

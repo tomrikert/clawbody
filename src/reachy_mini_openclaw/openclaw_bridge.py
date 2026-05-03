@@ -9,8 +9,11 @@ but routes all responses through OpenClaw (Clawson) for intelligence.
 
 import json
 import asyncio
+import base64
 import logging
 import uuid
+import time
+from pathlib import Path
 from typing import Optional, Any, AsyncIterator
 from dataclasses import dataclass
 
@@ -22,6 +25,8 @@ logger = logging.getLogger(__name__)
 
 # Protocol version supported by this client
 PROTOCOL_VERSION = 3
+PLACEHOLDER_TOKENS = {"", "your-gateway-token", "sk-your-openai-key"}
+ED25519_SPKI_PREFIX = bytes.fromhex("302a300506032b6570032100")
 
 
 @dataclass
@@ -78,6 +83,8 @@ class OpenClawBridge:
             or os.getenv("OPENCLAW_TOKEN")
             or config.OPENCLAW_TOKEN
         )
+        if (self.gateway_token or "") in PLACEHOLDER_TOKENS:
+            self.gateway_token = self._read_local_gateway_token()
         self.agent_id = (
             agent_id
             or os.getenv("OPENCLAW_AGENT_ID")
@@ -119,6 +126,100 @@ class OpenClawBridge:
             return "ws://" + url
         return url
 
+    @staticmethod
+    def _read_local_gateway_token() -> Optional[str]:
+        """Read the local OpenClaw gateway token when using a local install."""
+        try:
+            path = Path.home() / ".openclaw" / "openclaw.json"
+            data = json.loads(path.read_text(encoding="utf-8"))
+            token = data.get("gateway", {}).get("auth", {}).get("token")
+            return token if isinstance(token, str) and token else None
+        except Exception:
+            return None
+
+    @staticmethod
+    def _base64url(data: bytes) -> str:
+        """Encode bytes using unpadded base64url."""
+        return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
+    @staticmethod
+    def _raw_public_key_from_pem(public_key_pem: str) -> bytes:
+        """Extract raw Ed25519 public-key bytes from an SPKI PEM."""
+        from cryptography.hazmat.primitives import serialization
+
+        public_key = serialization.load_pem_public_key(public_key_pem.encode("utf-8"))
+        der = public_key.public_bytes(
+            serialization.Encoding.DER,
+            serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        if der.startswith(ED25519_SPKI_PREFIX):
+            return der[len(ED25519_SPKI_PREFIX):]
+        return der
+
+    def _build_local_device_auth(self, nonce: str, client: dict, role: str) -> tuple[dict, list[str]] | None:
+        """Build signed device auth for the local OpenClaw gateway."""
+        try:
+            from cryptography.hazmat.primitives import serialization
+            from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+            identity_path = Path.home() / ".openclaw" / "identity" / "device.json"
+            auth_path = Path.home() / ".openclaw" / "identity" / "device-auth.json"
+            identity = json.loads(identity_path.read_text(encoding="utf-8"))
+            auth_store = json.loads(auth_path.read_text(encoding="utf-8"))
+            token_record = (auth_store.get("tokens") or {}).get(role)
+            if not isinstance(token_record, dict):
+                return None
+
+            device_token = token_record.get("token")
+            scopes = token_record.get("scopes")
+            if not isinstance(device_token, str) or not isinstance(scopes, list):
+                return None
+
+            signed_at = int(time.time() * 1000)
+            platform = (client.get("platform") or "").strip().lower()
+            device_family = (client.get("deviceFamily") or "").strip().lower()
+            payload = "|".join(
+                [
+                    "v3",
+                    identity["deviceId"],
+                    client["id"],
+                    client["mode"],
+                    role,
+                    ",".join(scopes),
+                    str(signed_at),
+                    device_token,
+                    nonce,
+                    platform,
+                    device_family,
+                ]
+            )
+
+            private_key = serialization.load_pem_private_key(
+                identity["privateKeyPem"].encode("utf-8"),
+                password=None,
+            )
+            if not isinstance(private_key, Ed25519PrivateKey):
+                return None
+
+            signature = self._base64url(private_key.sign(payload.encode("utf-8")))
+            public_key = self._base64url(self._raw_public_key_from_pem(identity["publicKeyPem"]))
+            return (
+                {
+                    "auth": {"deviceToken": device_token},
+                    "device": {
+                        "id": identity["deviceId"],
+                        "publicKey": public_key,
+                        "signature": signature,
+                        "signedAt": signed_at,
+                        "nonce": nonce,
+                    },
+                },
+                scopes,
+            )
+        except Exception as e:
+            logger.debug("Local OpenClaw device auth unavailable: %s", e)
+            return None
+
     # ------------------------------------------------------------------
     # Connection lifecycle
     # ------------------------------------------------------------------
@@ -151,9 +252,27 @@ class OpenClawBridge:
             challenge = json.loads(raw)
             if challenge.get("event") != "connect.challenge":
                 logger.warning("Unexpected first frame: %s", challenge.get("event"))
+            nonce = (challenge.get("payload") or {}).get("nonce")
 
             # 2. Send connect request
             req_id = str(uuid.uuid4())
+            client_info = {
+                "id": "cli",
+                "version": "1.0.0",
+                "platform": "linux",
+                "mode": "cli",
+            }
+            role = "operator"
+            scopes = ["operator.write", "operator.read"]
+            auth: dict[str, str] = {"token": self.gateway_token} if self.gateway_token else {}
+            device: Optional[dict] = None
+            if isinstance(nonce, str) and nonce:
+                device_auth = self._build_local_device_auth(nonce, client_info, role)
+                if device_auth is not None:
+                    auth_and_device, scopes = device_auth
+                    auth = auth_and_device["auth"]
+                    device = auth_and_device["device"]
+
             connect_req = {
                 "type": "req",
                 "id": req_id,
@@ -161,17 +280,14 @@ class OpenClawBridge:
                 "params": {
                     "minProtocol": PROTOCOL_VERSION,
                     "maxProtocol": PROTOCOL_VERSION,
-                    "auth": {"token": self.gateway_token} if self.gateway_token else {},
-                    "client": {
-                        "id": "openclaw-control-ui",
-                        "version": "1.0.0",
-                        "platform": "linux",
-                        "mode": "webchat",
-                    },
-                    "role": "operator",
-                    "scopes": ["chat", "operator.write", "operator.read"],
+                    "auth": auth,
+                    "client": client_info,
+                    "role": role,
+                    "scopes": scopes,
                 },
             }
+            if device is not None:
+                connect_req["params"]["device"] = device
             await self._ws.send(json.dumps(connect_req))
 
             # 3. Read hello response

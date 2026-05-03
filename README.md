@@ -222,13 +222,59 @@ OPENCLAW_GATEWAY_URL=http://localhost:18789  # or your host IP
 OPENCLAW_TOKEN=your-gateway-token
 OPENCLAW_AGENT_ID=main
 
-# Optional - Customize voice
+# Optional - choose provider
+AI_PROVIDER=openai  # or "local"
+
+# Optional - Customize OpenAI voice
 OPENAI_VOICE=cedar
+
+# Optional - local AI mode
+LOCAL_LLM_BASE_URL=http://127.0.0.1:11434
+LOCAL_LLM_MODEL=gemma4:latest
+LOCAL_STT_MODEL=large-v3-turbo
+LOCAL_STT_DEVICE=cpu
+LOCAL_STT_COMPUTE_TYPE=int8
+LOCAL_TTS_ENGINE=kokoro
+LOCAL_TTS_VOICE=af_heart
 
 # Optional - Face tracking (enabled by default)
 ENABLE_FACE_TRACKING=true
 HEAD_TRACKER_TYPE=mediapipe  # or "yolo" for more accuracy
 ```
+
+### Local AI Mode
+
+ClawBody can run without OpenAI Realtime by using local speech and language models:
+
+```bash
+# Install local voice extras
+pip install -e ".[local_ai]"
+
+# Make sure Ollama is running and the recommended live model exists
+ollama pull gemma4
+
+# Run with local STT + Ollama + Kokoro TTS
+AI_PROVIDER=local clawbody
+
+# Or via CLI
+clawbody --local-ai
+```
+
+For CUDA-accelerated local STT with `uv`, install the CUDA 12 STT extra and use
+the launcher script. The script exports the CUDA 12 wheel library paths before
+Python starts, which CTranslate2 needs for `faster-whisper`:
+
+```bash
+uv sync --extra local-ai --extra cuda12-stt
+scripts/clawbody-local-cuda12
+```
+
+Recommended local stack for a 24 GB NVIDIA laptop GPU:
+
+- **Live voice LLM**: `gemma4:latest`
+- **Slower reasoning / coding model**: `qwen3.6:latest`
+- **STT**: `large-v3-turbo` through `faster-whisper`; CPU/int8 by default, CUDA/float16 through `scripts/clawbody-local-cuda12`
+- **TTS**: Kokoro voice `af_heart`
 
 ## 🎮 Usage
 

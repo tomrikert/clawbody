@@ -53,6 +53,7 @@ dmypy.json
 
 # Logs
 *.log
+MUJOCO_LOG.TXT
 
 # OS
 .DS_Store

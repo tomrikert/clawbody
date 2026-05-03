@@ -85,6 +85,53 @@ async def _analyze_image_with_openai(frame: np.ndarray, prompt: str) -> Optional
         return None
 
 
+async def _analyze_image_with_ollama(frame: np.ndarray, prompt: str) -> Optional[str]:
+    """Analyze an image using the configured local Ollama vision model."""
+    try:
+        import cv2
+        import urllib.request
+
+        from reachy_mini_openclaw.config import config
+
+        _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        b64_image = base64.b64encode(buffer).decode('utf-8')
+
+        payload = {
+            "model": config.LOCAL_VISION_LLM_MODEL,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": prompt,
+                    "images": [b64_image],
+                }
+            ],
+            "stream": False,
+            "think": False,
+            "options": {
+                "num_predict": 180,
+                "temperature": 0.3,
+            },
+        }
+        url = config.LOCAL_LLM_BASE_URL.rstrip("/") + "/api/chat"
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+
+        def _request() -> Optional[str]:
+            with urllib.request.urlopen(request, timeout=config.LOCAL_LLM_TIMEOUT) as response:
+                data = json.loads(response.read().decode("utf-8"))
+            text = (data.get("message", {}) or {}).get("content")
+            return text.strip() if text else None
+
+        import asyncio
+        return await asyncio.to_thread(_request)
+    except Exception as e:
+        logger.error("Local Ollama vision analysis failed: %s", e)
+        return None
+
+
 @dataclass
 class ToolDependencies:
     """Dependencies required by tools.
@@ -277,8 +324,9 @@ async def _handle_camera(args: dict, deps: ToolDependencies) -> dict:
     
     Priority order for vision analysis:
     1. Local SmolVLM2 (on-device, no network latency)
-    2. OpenAI Vision API (gpt-4o-mini, reliable cloud vision)
-    3. OpenClaw bridge (text-only fallback)
+    2. Local Ollama vision model when AI_PROVIDER=local
+    3. OpenAI Vision API (gpt-4o-mini, reliable cloud vision)
+    4. OpenClaw bridge (text-only fallback)
     """
     logger.info("Camera tool called, camera_worker=%s, vision_manager=%s", 
                 deps.camera_worker is not None, deps.vision_manager is not None)
@@ -325,17 +373,32 @@ async def _handle_camera(args: dict, deps: ToolDependencies) -> dict:
                 }
             else:
                 logger.warning("Local vision failed: %s", description)
-        
-        # Option 2: Use OpenAI Vision API (gpt-4o-mini) for image analysis
-        logger.info("Using OpenAI Vision API (gpt-4o-mini) for image analysis...")
-        openai_description = await _analyze_image_with_openai(frame, vision_prompt)
-        if openai_description:
-            logger.info("OpenAI vision response: %s", openai_description[:100])
-            return {
-                "status": "success",
-                "description": openai_description,
-                "source": "openai_vision"
-            }
+
+        from reachy_mini_openclaw.config import config
+
+        # Option 2: In local AI mode, use the configured local Ollama vision model.
+        if config.AI_PROVIDER == "local":
+            logger.info("Using local Ollama vision model (%s)...", config.LOCAL_VISION_LLM_MODEL)
+            local_description = await _analyze_image_with_ollama(frame, vision_prompt)
+            if local_description:
+                logger.info("Local Ollama vision response: %s", local_description[:100])
+                return {
+                    "status": "success",
+                    "description": local_description,
+                    "source": "local_ollama_vision",
+                }
+            logger.warning("Local Ollama vision failed")
+        else:
+            # Option 2: Use OpenAI Vision API (gpt-4o-mini) for image analysis
+            logger.info("Using OpenAI Vision API (gpt-4o-mini) for image analysis...")
+            openai_description = await _analyze_image_with_openai(frame, vision_prompt)
+            if openai_description:
+                logger.info("OpenAI vision response: %s", openai_description[:100])
+                return {
+                    "status": "success",
+                    "description": openai_description,
+                    "source": "openai_vision"
+                }
         
         # Option 3: Fall back to OpenClaw for vision analysis (text-only, limited)
         if deps.openclaw_bridge is not None and deps.openclaw_bridge.is_connected:

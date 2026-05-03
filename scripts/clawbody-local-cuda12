@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+CUDA12_LIBRARY_PATH="$(
+  .venv/bin/python - <<'PY'
+import nvidia.cublas.lib
+import nvidia.cuda_nvrtc.lib
+import nvidia.cudnn.lib
+
+print(":".join([
+    list(nvidia.cublas.lib.__path__)[0],
+    list(nvidia.cudnn.lib.__path__)[0],
+    list(nvidia.cuda_nvrtc.lib.__path__)[0],
+]))
+PY
+)"
+
+export LD_LIBRARY_PATH="${CUDA12_LIBRARY_PATH}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+export AI_PROVIDER="${AI_PROVIDER:-local}"
+export LOCAL_STT_DEVICE="${LOCAL_STT_DEVICE:-cuda}"
+export LOCAL_STT_COMPUTE_TYPE="${LOCAL_STT_COMPUTE_TYPE:-float16}"
+
+REACHY_CONTROL_SITE="$HOME/.local/share/reachy-mini-control/.venv/lib/python3.12/site-packages"
+if [[ -d "$REACHY_CONTROL_SITE" ]]; then
+  export PYTHONPATH="${REACHY_CONTROL_SITE}${PYTHONPATH:+:${PYTHONPATH}}"
+fi
+
+exec .venv/bin/clawbody --local-ai "$@"
