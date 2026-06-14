@@ -10,18 +10,27 @@ but routes all responses through OpenClaw (Clawson) for intelligence.
 import json
 import asyncio
 import logging
+import time
 import uuid
+from pathlib import Path
 from typing import Optional, Any, AsyncIterator
 from dataclasses import dataclass
 
 import websockets
 
 from reachy_mini_openclaw.config import config
+from reachy_mini_openclaw.device_identity import (
+    DeviceIdentity,
+    build_device_auth_payload_v2,
+)
 
 logger = logging.getLogger(__name__)
 
-# Protocol version supported by this client
+# Protocol version range supported by this client. OpenClaw 6.x negotiates
+# within [minProtocol, maxProtocol]; pinning a single value caused
+# "protocol mismatch" against newer gateways.
 PROTOCOL_VERSION = 3
+MAX_PROTOCOL_VERSION = 4
 
 
 @dataclass
@@ -104,6 +113,15 @@ class OpenClawBridge:
         # Events keyed by runId -> list of event payloads
         self._run_events: dict[str, asyncio.Queue] = {}
 
+        # Persistent Ed25519 device identity (required by OpenClaw 6.x for
+        # operator scopes). Path overridable via CLAWBODY_DEVICE_IDENTITY.
+        ident_path = Path(
+            os.getenv("CLAWBODY_DEVICE_IDENTITY")
+            or os.path.expanduser("~/.clawbody/device-identity.json")
+        )
+        ident_path.parent.mkdir(parents=True, exist_ok=True)
+        self.device = DeviceIdentity.load_or_create(ident_path)
+
     # ------------------------------------------------------------------
     # URL helpers
     # ------------------------------------------------------------------
@@ -146,13 +164,35 @@ class OpenClawBridge:
                 close_timeout=5,
             )
 
-            # 1. Receive challenge
+            # 1. Receive challenge (carries the nonce we must sign)
             raw = await asyncio.wait_for(self._ws.recv(), timeout=10)
             challenge = json.loads(raw)
             if challenge.get("event") != "connect.challenge":
                 logger.warning("Unexpected first frame: %s", challenge.get("event"))
+            nonce = (challenge.get("payload") or {}).get("nonce", "")
 
-            # 2. Send connect request
+            # 2. Build the device-signed connect request. OpenClaw 6.x requires
+            # a device identity for operator scopes; sign the challenge nonce
+            # with our persistent Ed25519 device key.
+            client_id = "openclaw-control-ui"
+            client_mode = "webchat"
+            role = "operator"
+            # 6.x: chat frames are covered by operator.read/operator.write;
+            # there is no separate "chat" scope (approve rejects it).
+            scopes = ["operator.read", "operator.write"]
+            signed_at_ms = int(time.time() * 1000)
+            auth_payload = build_device_auth_payload_v2(
+                device_id=self.device.device_id,
+                client_id=client_id,
+                client_mode=client_mode,
+                role=role,
+                scopes=scopes,
+                signed_at_ms=signed_at_ms,
+                token=self.gateway_token or "",
+                nonce=nonce,
+            )
+            signature = self.device.sign_payload(auth_payload)
+
             req_id = str(uuid.uuid4())
             connect_req = {
                 "type": "req",
@@ -160,16 +200,23 @@ class OpenClawBridge:
                 "method": "connect",
                 "params": {
                     "minProtocol": PROTOCOL_VERSION,
-                    "maxProtocol": PROTOCOL_VERSION,
+                    "maxProtocol": MAX_PROTOCOL_VERSION,
                     "auth": {"token": self.gateway_token} if self.gateway_token else {},
                     "client": {
-                        "id": "openclaw-control-ui",
+                        "id": client_id,
                         "version": "1.0.0",
-                        "platform": "linux",
-                        "mode": "webchat",
+                        "platform": "darwin",
+                        "mode": client_mode,
                     },
-                    "role": "operator",
-                    "scopes": ["chat", "operator.write", "operator.read"],
+                    "role": role,
+                    "scopes": scopes,
+                    "device": {
+                        "id": self.device.device_id,
+                        "publicKey": self.device.public_key_b64url,
+                        "signature": signature,
+                        "signedAt": signed_at_ms,
+                        "nonce": nonce,
+                    },
                 },
             }
             await self._ws.send(json.dumps(connect_req))
@@ -183,10 +230,16 @@ class OpenClawBridge:
                 payload = hello.get("payload", {})
                 server = payload.get("server", {})
                 self._conn_id = server.get("connId")
+                # Cache the device token for future reconnects (optional).
+                self.device.set_device_token(
+                    (payload.get("auth") or {}).get("deviceToken")
+                )
+                granted = (payload.get("auth") or {}).get("scopes")
                 logger.info(
-                    "Connected to OpenClaw gateway (server=%s, connId=%s)",
+                    "Connected to OpenClaw gateway (server=%s, connId=%s, scopes=%s)",
                     server.get("host", "?"),
                     self._conn_id,
+                    granted,
                 )
                 # Start background listener
                 self._listener_task = asyncio.create_task(
@@ -195,11 +248,18 @@ class OpenClawBridge:
                 return True
             else:
                 err = hello.get("error", {})
-                logger.error(
-                    "OpenClaw connect failed: %s - %s",
-                    err.get("code"),
-                    err.get("message"),
-                )
+                code = err.get("code")
+                message = err.get("message", "")
+                logger.error("OpenClaw connect failed: %s - %s", code, message)
+                blob = f"{code} {message} {err.get('details')}".lower()
+                if "pair" in blob or "not-paired" in blob or "approve" in blob:
+                    logger.error(
+                        "Device pairing required. On the gateway host run:\n"
+                        "    openclaw nodes pending\n"
+                        "    openclaw nodes approve <requestId>\n"
+                        "  (this device id: %s)",
+                        self.device.device_id,
+                    )
                 await self._close_ws()
                 return False
 
