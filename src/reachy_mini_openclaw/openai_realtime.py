@@ -225,25 +225,33 @@ OpenClaw has access to many capabilities you don't have directly.""",
         # Fetch OpenClaw agent context (personality, memories, user info)
         system_instructions = await self._build_system_instructions()
         
-        async with self.client.beta.realtime.connect(model=model) as conn:
+        # GA Realtime API (the beta API shape was retired by OpenAI in May 2026)
+        async with self.client.realtime.connect(model=model) as conn:
             # Configure session with OpenClaw's identity + robot body capabilities
             tools = self._build_tools()
             
             await conn.session.update(
                 session={
-                    "modalities": ["text", "audio"],
+                    "type": "realtime",
+                    "output_modalities": ["audio"],
                     "instructions": system_instructions,
-                    "voice": get_session_voice(),
-                    "input_audio_format": "pcm16",
-                    "output_audio_format": "pcm16",
-                    "input_audio_transcription": {
-                        "model": "whisper-1",
-                    },
-                    "turn_detection": {
-                        "type": "server_vad",
-                        "threshold": 0.5,
-                        "prefix_padding_ms": 300,
-                        "silence_duration_ms": 600,
+                    "audio": {
+                        "input": {
+                            "format": {"type": "audio/pcm", "rate": OPENAI_SAMPLE_RATE},
+                            "transcription": {
+                                "model": "gpt-4o-transcribe",
+                            },
+                            "turn_detection": {
+                                "type": "server_vad",
+                                "threshold": 0.5,
+                                "prefix_padding_ms": 300,
+                                "silence_duration_ms": 600,
+                            },
+                        },
+                        "output": {
+                            "format": {"type": "audio/pcm", "rate": OPENAI_SAMPLE_RATE},
+                            "voice": get_session_voice(),
+                        },
                     },
                     "tools": tools,
                     "tool_choice": "auto",
@@ -321,8 +329,8 @@ OpenClaw has access to many capabilities you don't have directly.""",
             self._speaking = True
             logger.debug("Response started")
             
-        # Audio output from TTS
-        if event_type == "response.audio.delta":
+        # Audio output from TTS (GA event name; was response.audio.delta in beta)
+        if event_type == "response.output_audio.delta":
             # Audio arriving means we have a response - stop thinking animation
             self.deps.movement_manager.set_processing(False)
             
@@ -340,11 +348,11 @@ OpenClaw has access to many capabilities you don't have directly.""",
             await self.output_queue.put((OPENAI_SAMPLE_RATE, audio_data))
             
         # Response text (for logging and UI)
-        if event_type == "response.audio_transcript.delta":
+        if event_type == "response.output_audio_transcript.delta":
             # Streaming transcript of what's being said
             pass  # Could log incrementally if needed
             
-        if event_type == "response.audio_transcript.done":
+        if event_type == "response.output_audio_transcript.done":
             response_text = event.transcript
             logger.info("Assistant: %s", response_text[:100] if len(response_text) > 100 else response_text)
             self._last_assistant_response = response_text  # Track for sync

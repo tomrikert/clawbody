@@ -62,7 +62,7 @@ class HeadTracker:
 
         try:
             # Convert BGR to RGB for MediaPipe
-            rgb_img = img[:, :, ::-1]
+            rgb_img = np.ascontiguousarray(img[:, :, ::-1])
             
             # Run face detection
             results = self.face_detection.process(rgb_img)

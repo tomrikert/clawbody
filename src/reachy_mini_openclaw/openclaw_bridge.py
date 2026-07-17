@@ -9,8 +9,12 @@ but routes all responses through OpenClaw (Clawson) for intelligence.
 
 import json
 import asyncio
+import base64
+import hashlib
 import logging
+import time
 import uuid
+from pathlib import Path
 from typing import Optional, Any, AsyncIterator
 from dataclasses import dataclass
 
@@ -21,7 +25,97 @@ from reachy_mini_openclaw.config import config
 logger = logging.getLogger(__name__)
 
 # Protocol version supported by this client
-PROTOCOL_VERSION = 3
+PROTOCOL_VERSION = 4
+
+# Where this device's Ed25519 identity is persisted. The OpenClaw gateway
+# requires remote (non-localhost) clients to present a stable device identity;
+# the device must be approved (paired) once on the gateway, after which the
+# requested scopes are granted to this identity.
+DEVICE_IDENTITY_PATH = Path.home() / ".clawbody" / "device-identity.json"
+
+
+def _b64url(data: bytes) -> str:
+    """Base64url-encode without padding (matches OpenClaw's encoding)."""
+    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
+
+def _b64url_decode(data: str) -> bytes:
+    """Base64url-decode, tolerating missing padding."""
+    return base64.urlsafe_b64decode(data + "=" * (-len(data) % 4))
+
+
+def _load_or_create_device_identity() -> dict:
+    """Load the persistent device identity, creating it on first use."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    if DEVICE_IDENTITY_PATH.exists():
+        data = json.loads(DEVICE_IDENTITY_PATH.read_text())
+        private_key = Ed25519PrivateKey.from_private_bytes(
+            _b64url_decode(data["privateKey"])
+        )
+    else:
+        private_key = Ed25519PrivateKey.generate()
+        raw_private = private_key.private_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PrivateFormat.Raw,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        DEVICE_IDENTITY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        DEVICE_IDENTITY_PATH.touch(mode=0o600, exist_ok=True)
+        DEVICE_IDENTITY_PATH.write_text(
+            json.dumps({"privateKey": _b64url(raw_private)})
+        )
+
+    raw_public = private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    return {
+        "private_key": private_key,
+        "public_key_b64url": _b64url(raw_public),
+        # Device id is the sha256 hex digest of the raw public key
+        "device_id": hashlib.sha256(raw_public).hexdigest(),
+    }
+
+
+def _build_device_auth(
+    nonce: str,
+    client_info: dict,
+    role: str,
+    scopes: list,
+    token: Optional[str],
+) -> Optional[dict]:
+    """Build the signed `device` connect param (v3 signature payload)."""
+    try:
+        identity = _load_or_create_device_identity()
+        signed_at = int(time.time() * 1000)
+        payload_v3 = "|".join(
+            [
+                "v3",
+                identity["device_id"],
+                client_info["id"],
+                client_info["mode"],
+                role,
+                ",".join(scopes),
+                str(signed_at),
+                token or "",
+                nonce,
+                client_info.get("platform", "").lower(),
+                "",  # deviceFamily (unset)
+            ]
+        )
+        signature = identity["private_key"].sign(payload_v3.encode("utf-8"))
+        return {
+            "id": identity["device_id"],
+            "publicKey": identity["public_key_b64url"],
+            "signature": _b64url(signature),
+            "signedAt": signed_at,
+            "nonce": nonce,
+        }
+    except Exception as e:
+        logger.warning("Device identity unavailable, connecting without it: %s", e)
+        return None
 
 
 @dataclass
@@ -146,31 +240,49 @@ class OpenClawBridge:
                 close_timeout=5,
             )
 
-            # 1. Receive challenge
+            # 1. Receive challenge (carries the nonce for device signing)
             raw = await asyncio.wait_for(self._ws.recv(), timeout=10)
             challenge = json.loads(raw)
+            nonce = None
             if challenge.get("event") != "connect.challenge":
                 logger.warning("Unexpected first frame: %s", challenge.get("event"))
+            else:
+                payload = challenge.get("payload") or {}
+                nonce = payload.get("nonce") or challenge.get("nonce")
 
-            # 2. Send connect request
+            # 2. Send connect request (with signed device identity when possible)
+            client_info = {
+                "id": "gateway-client",
+                "version": "1.0.0",
+                "platform": "linux",
+                "mode": "backend",
+            }
+            role = "operator"
+            scopes = ["operator.read", "operator.write"]
+            device = (
+                _build_device_auth(
+                    nonce, client_info, role, scopes, self.gateway_token
+                )
+                if nonce
+                else None
+            )
+
             req_id = str(uuid.uuid4())
+            params = {
+                "minProtocol": PROTOCOL_VERSION,
+                "maxProtocol": PROTOCOL_VERSION,
+                "auth": {"token": self.gateway_token} if self.gateway_token else {},
+                "client": client_info,
+                "role": role,
+                "scopes": scopes,
+            }
+            if device:
+                params["device"] = device
             connect_req = {
                 "type": "req",
                 "id": req_id,
                 "method": "connect",
-                "params": {
-                    "minProtocol": PROTOCOL_VERSION,
-                    "maxProtocol": PROTOCOL_VERSION,
-                    "auth": {"token": self.gateway_token} if self.gateway_token else {},
-                    "client": {
-                        "id": "openclaw-control-ui",
-                        "version": "1.0.0",
-                        "platform": "linux",
-                        "mode": "webchat",
-                    },
-                    "role": "operator",
-                    "scopes": ["chat", "operator.write", "operator.read"],
-                },
+                "params": params,
             }
             await self._ws.send(json.dumps(connect_req))
 
@@ -200,6 +312,15 @@ class OpenClawBridge:
                     err.get("code"),
                     err.get("message"),
                 )
+                if err.get("code") == "NOT_PAIRED" or "pairing" in str(
+                    err.get("message", "")
+                ).lower():
+                    logger.warning(
+                        "This robot's device identity is awaiting approval on the "
+                        "gateway. On the gateway machine, approve the pending "
+                        "device (e.g. `openclaw devices` / Control UI -> Devices), "
+                        "then reconnect."
+                    )
                 await self._close_ws()
                 return False
 
