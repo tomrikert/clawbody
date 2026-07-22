@@ -784,4 +784,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    # Reachy's wireless app manager launches the module from the
+    # ``reachy_mini_apps`` entry point with ``python -m``.  That path must use
+    # the SDK wrapper so the daemon supplies the already-connected robot and
+    # owns the media session.  The ``clawbodylocal`` console script still calls
+    # ``main()`` directly for standalone development.
+    ReachyMiniOpenclaw().wrapped_run()

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "clawbodylocal"
-version = "0.2.0"
+version = "0.2.1"
 description = "Asmo's local OpenClaw body for Reachy Mini, with local STT, pluggable TTS, and expressive movement."
 readme = "README.md"
 license = {text = "Apache-2.0"}
