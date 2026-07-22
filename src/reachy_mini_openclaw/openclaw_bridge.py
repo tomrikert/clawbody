@@ -3,17 +3,19 @@
 This module provides ClawBody's integration with the OpenClaw gateway
 using the WebSocket protocol (the gateway's native transport).
 
-ClawBody uses OpenAI Realtime API for voice I/O (speech recognition + TTS)
-but routes all responses through OpenClaw (Clawson) for intelligence.
+ClawBody routes transcribed speech to OpenClaw, which is the sole
+conversational brain. Speech recognition and synthesis are provider adapters.
 """
 
-import json
 import asyncio
+import json
 import logging
+import shutil
 import uuid
-from typing import Optional, Any, AsyncIterator
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
+import httpx
 import websockets
 
 from reachy_mini_openclaw.config import config
@@ -21,14 +23,15 @@ from reachy_mini_openclaw.config import config
 logger = logging.getLogger(__name__)
 
 # Protocol version supported by this client
-PROTOCOL_VERSION = 3
+PROTOCOL_VERSION = 4
 
 
 @dataclass
 class OpenClawResponse:
     """Response from OpenClaw gateway."""
+
     content: str
-    error: Optional[str] = None
+    error: str | None = None
 
 
 class OpenClawBridge:
@@ -49,9 +52,9 @@ class OpenClawBridge:
 
     def __init__(
         self,
-        gateway_url: Optional[str] = None,
-        gateway_token: Optional[str] = None,
-        agent_id: Optional[str] = None,
+        gateway_url: str | None = None,
+        gateway_token: str | None = None,
+        agent_id: str | None = None,
         timeout: float = 300.0,
     ):
         """Initialize the OpenClaw bridge.
@@ -65,41 +68,29 @@ class OpenClawBridge:
         """
         import os
 
-        raw_url = (
-            gateway_url
-            or os.getenv("OPENCLAW_GATEWAY_URL")
-            or config.OPENCLAW_GATEWAY_URL
-        )
+        raw_url = gateway_url or os.getenv("OPENCLAW_GATEWAY_URL") or config.OPENCLAW_GATEWAY_URL
         # Normalise to ws:// (the gateway listens on the same port for both)
         self.gateway_url = self._normalise_ws_url(raw_url)
 
-        self.gateway_token = (
-            gateway_token
-            or os.getenv("OPENCLAW_TOKEN")
-            or config.OPENCLAW_TOKEN
-        )
-        self.agent_id = (
-            agent_id
-            or os.getenv("OPENCLAW_AGENT_ID")
-            or config.OPENCLAW_AGENT_ID
-        )
+        self.gateway_token = gateway_token or os.getenv("OPENCLAW_TOKEN") or config.OPENCLAW_TOKEN
+        self.agent_id = agent_id or os.getenv("OPENCLAW_AGENT_ID") or config.OPENCLAW_AGENT_ID
+        self.thinking = os.getenv("OPENCLAW_THINKING") or config.OPENCLAW_THINKING
         self.timeout = timeout
 
         # Session key – "main" shares context with WhatsApp and other channels.
         # Full key format: agent:<agent_id>:<session_key>
-        self.session_key = (
-            os.getenv("OPENCLAW_SESSION_KEY")
-            or config.OPENCLAW_SESSION_KEY
-            or "main"
-        )
+        self.session_key = os.getenv("OPENCLAW_SESSION_KEY") or config.OPENCLAW_SESSION_KEY or "main"
 
         # Persistent WebSocket state
-        self._ws: Optional[websockets.WebSocketClientProtocol] = None
+        self._ws: websockets.WebSocketClientProtocol | None = None
         self._connected = False
-        self._conn_id: Optional[str] = None
+        self._conn_id: str | None = None
+        self._use_cli = False
+        self._use_http = False
+        self._http: httpx.AsyncClient | None = None
 
         # Background listener task & pending request futures
-        self._listener_task: Optional[asyncio.Task] = None
+        self._listener_task: asyncio.Task | None = None
         self._pending: dict[str, asyncio.Future] = {}
         # Events keyed by runId -> list of event payloads
         self._run_events: dict[str, asyncio.Queue] = {}
@@ -134,6 +125,8 @@ class OpenClawBridge:
             self.gateway_url,
             "set" if self.gateway_token else "not set",
         )
+        if await self._connect_http():
+            return True
         try:
             # Build origin header from the gateway URL so the control-UI
             # origin check accepts programmatic WebSocket clients.
@@ -163,13 +156,17 @@ class OpenClawBridge:
                     "maxProtocol": PROTOCOL_VERSION,
                     "auth": {"token": self.gateway_token} if self.gateway_token else {},
                     "client": {
-                        "id": "openclaw-control-ui",
+                        # This is a loopback service bridge, not a browser UI.
+                        # Using the control-UI identity incorrectly triggers the
+                        # browser device-identity policy in protocol v4.
+                        "id": "cli",
+                        "displayName": "ClawBody Reachy bridge",
                         "version": "1.0.0",
                         "platform": "linux",
-                        "mode": "webchat",
+                        "mode": "cli",
                     },
                     "role": "operator",
-                    "scopes": ["chat", "operator.write", "operator.read"],
+                    "scopes": ["operator.write", "operator.read"],
                 },
             }
             await self._ws.send(json.dumps(connect_req))
@@ -179,8 +176,20 @@ class OpenClawBridge:
             hello = json.loads(raw)
 
             if hello.get("ok"):
-                self._connected = True
                 payload = hello.get("payload", {})
+                granted_scopes = set((payload.get("auth") or {}).get("scopes") or [])
+                if "operator.write" not in granted_scopes and "operator.admin" not in granted_scopes:
+                    # Current OpenClaw gateways intentionally do not grant
+                    # operator scopes to a hand-rolled shared-token socket.
+                    # Fall back to the supported local CLI transport, which
+                    # handles device identity and scope negotiation for us.
+                    logger.info("Gateway socket connected without operator.write; using the OpenClaw CLI transport")
+                    await self._close_ws()
+                    self._use_cli = True
+                    self._connected = shutil.which("openclaw") is not None
+                    return self._connected
+
+                self._connected = True
                 server = payload.get("server", {})
                 self._conn_id = server.get("connId")
                 logger.info(
@@ -189,9 +198,7 @@ class OpenClawBridge:
                     self._conn_id,
                 )
                 # Start background listener
-                self._listener_task = asyncio.create_task(
-                    self._listen_loop(), name="openclaw-ws-listener"
-                )
+                self._listener_task = asyncio.create_task(self._listen_loop(), name="openclaw-ws-listener")
                 return True
             else:
                 err = hello.get("error", {})
@@ -215,6 +222,11 @@ class OpenClawBridge:
     async def disconnect(self) -> None:
         """Disconnect from the gateway."""
         self._connected = False
+        self._use_cli = False
+        self._use_http = False
+        if self._http is not None:
+            await self._http.aclose()
+            self._http = None
         if self._listener_task and not self._listener_task.done():
             self._listener_task.cancel()
             try:
@@ -231,6 +243,29 @@ class OpenClawBridge:
             except Exception:
                 pass
             self._ws = None
+
+    def _http_base_url(self) -> str:
+        return self.gateway_url.replace("ws://", "http://").replace("wss://", "https://")
+
+    async def _connect_http(self) -> bool:
+        """Prefer the persistent loopback HTTP client over per-turn CLI startup."""
+        headers = {"Authorization": f"Bearer {self.gateway_token}"} if self.gateway_token else {}
+        client = httpx.AsyncClient(
+            base_url=self._http_base_url(),
+            headers=headers,
+            timeout=httpx.Timeout(self.timeout),
+        )
+        try:
+            response = await client.get("/v1/models", timeout=5.0)
+            response.raise_for_status()
+        except Exception:
+            await client.aclose()
+            return False
+        self._http = client
+        self._use_http = True
+        self._connected = True
+        logger.info("Using persistent OpenClaw HTTP chat transport")
+        return True
 
     # ------------------------------------------------------------------
     # Background listener
@@ -284,9 +319,7 @@ class OpenClawBridge:
     # Request helpers
     # ------------------------------------------------------------------
 
-    async def _send_request(
-        self, method: str, params: dict, timeout: Optional[float] = None
-    ) -> dict:
+    async def _send_request(self, method: str, params: dict, timeout: float | None = None) -> dict:
         """Send a request and wait for the response.
 
         Args:
@@ -310,7 +343,7 @@ class OpenClawBridge:
             await self._ws.send(json.dumps(req))
             result = await asyncio.wait_for(fut, timeout=timeout or self.timeout)
             return result
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self._pending.pop(req_id, None)
             return {"ok": False, "error": {"code": "TIMEOUT", "message": "Request timed out"}}
         except Exception as e:
@@ -328,8 +361,8 @@ class OpenClawBridge:
     async def chat(
         self,
         message: str,
-        image_b64: Optional[str] = None,
-        system_context: Optional[str] = None,
+        image_b64: str | None = None,
+        system_context: str | None = None,
     ) -> OpenClawResponse:
         """Send a message to OpenClaw and get a response.
 
@@ -358,6 +391,13 @@ class OpenClawBridge:
         # image passing would require a separate mechanism)
         if image_b64:
             final_message = f"[Image attached]\n{final_message}"
+
+        if self._use_http:
+            return await self._chat_via_http(final_message, image_b64=image_b64)
+        if self._use_cli:
+            if image_b64:
+                return await self._chat_with_image_via_gateway_cli(final_message, image_b64)
+            return await self._chat_via_cli(final_message)
 
         idempotency_key = str(uuid.uuid4())
         session_key = self._full_session_key()
@@ -393,9 +433,7 @@ class OpenClawBridge:
                 full_text = ""
                 while True:
                     try:
-                        event = await asyncio.wait_for(
-                            event_queue.get(), timeout=self.timeout
-                        )
+                        event = await asyncio.wait_for(event_queue.get(), timeout=self.timeout)
                         payload = event.get("payload", {})
                         event_name = event.get("event", "")
 
@@ -425,7 +463,7 @@ class OpenClawBridge:
                                     full_text = content_parts
                                 break
 
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         logger.warning("Timeout waiting for chat response (runId=%s)", run_id)
                         if full_text:
                             break
@@ -440,10 +478,168 @@ class OpenClawBridge:
             logger.error("OpenClaw chat error: %s", e)
             return OpenClawResponse(content="", error=str(e))
 
+    async def _chat_via_http(
+        self, message: str, image_b64: str | None = None
+    ) -> OpenClawResponse:
+        """Run a normal agent turn without spawning the OpenClaw CLI."""
+        if self._http is None:
+            return OpenClawResponse(content="", error="HTTP transport is unavailable")
+        content: str | list[dict[str, object]] = message
+        if image_b64:
+            content = [
+                {"type": "text", "text": message},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"},
+                },
+            ]
+        try:
+            response = await self._http.post(
+                "/v1/chat/completions",
+                headers={"x-openclaw-session-key": self._full_session_key()},
+                json={
+                    "model": f"openclaw/{self.agent_id}",
+                    "messages": [{"role": "user", "content": content}],
+                    "max_completion_tokens": 180,
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+            text = payload["choices"][0]["message"].get("content") or ""
+            return OpenClawResponse(content=text)
+        except Exception as exc:
+            logger.error("OpenClaw HTTP chat failed: %s", exc)
+            return OpenClawResponse(content="", error=str(exc))
+
+    async def _chat_via_cli(self, message: str) -> OpenClawResponse:
+        """Run an agent turn through OpenClaw's supported local CLI client."""
+        process: asyncio.subprocess.Process | None = None
+        command = [
+            "openclaw",
+            "agent",
+            "--agent",
+            self.agent_id,
+            "--session-key",
+            self._full_session_key(),
+            "--message",
+            message,
+            "--thinking",
+            self.thinking,
+            "--timeout",
+            str(max(1, int(self.timeout))),
+            "--json",
+        ]
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=self.timeout + 15)
+        except TimeoutError:
+            if process is not None and process.returncode is None:
+                process.kill()
+                await process.wait()
+            return OpenClawResponse(content="", error="Response timeout")
+        except Exception as exc:
+            return OpenClawResponse(content="", error=str(exc))
+
+        if process.returncode != 0:
+            detail = stderr.decode("utf-8", errors="replace").strip()
+            return OpenClawResponse(content="", error=detail or f"openclaw exited {process.returncode}")
+
+        try:
+            result = json.loads(stdout)
+            payload = result.get("result") or {}
+            text = payload.get("finalAssistantVisibleText")
+            if not text:
+                chunks = [item.get("text", "") for item in payload.get("payloads", []) if isinstance(item, dict)]
+                text = "\n".join(chunk for chunk in chunks if chunk)
+            return OpenClawResponse(content=text or "")
+        except (json.JSONDecodeError, TypeError) as exc:
+            return OpenClawResponse(content="", error=f"Invalid OpenClaw response: {exc}")
+
+    async def _run_gateway_call(self, method: str, params: dict, timeout_ms: int) -> dict:
+        process = await asyncio.create_subprocess_exec(
+            "openclaw",
+            "gateway",
+            "call",
+            method,
+            "--params",
+            json.dumps(params),
+            "--timeout",
+            str(timeout_ms),
+            "--json",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(
+            process.communicate(), timeout=(timeout_ms / 1000) + 15
+        )
+        if process.returncode != 0:
+            detail = stderr.decode("utf-8", errors="replace").strip()
+            raise RuntimeError(detail or f"gateway call exited {process.returncode}")
+        return json.loads(stdout)
+
+    async def _chat_with_image_via_gateway_cli(
+        self, message: str, image_b64: str
+    ) -> OpenClawResponse:
+        """Use authenticated gateway RPC so native image attachments reach the agent."""
+        run_id = str(uuid.uuid4())
+        timeout_ms = max(1_000, int(self.timeout * 1_000))
+        try:
+            started = await self._run_gateway_call(
+                "chat.send",
+                {
+                    "sessionKey": self._full_session_key(),
+                    "agentId": self.agent_id,
+                    "message": message,
+                    "attachments": [
+                        {
+                            "type": "image",
+                            "mimeType": "image/jpeg",
+                            "fileName": "reachy-view.jpg",
+                            "content": image_b64,
+                        }
+                    ],
+                    "idempotencyKey": run_id,
+                },
+                timeout_ms,
+            )
+            actual_run_id = started.get("runId") or run_id
+            await self._run_gateway_call(
+                "agent.wait",
+                {"runId": actual_run_id, "timeoutMs": timeout_ms},
+                timeout_ms,
+            )
+            history = await self._run_gateway_call(
+                "chat.history",
+                {"sessionKey": self._full_session_key(), "limit": 6},
+                30_000,
+            )
+            for item in reversed(history.get("messages", [])):
+                if item.get("role") != "assistant":
+                    continue
+                content = item.get("content", "")
+                if isinstance(content, str):
+                    return OpenClawResponse(content=content)
+                if isinstance(content, list):
+                    text = "\n".join(
+                        part.get("text", "")
+                        for part in content
+                        if isinstance(part, dict) and part.get("type") == "text"
+                    ).strip()
+                    if text:
+                        return OpenClawResponse(content=text)
+            return OpenClawResponse(content="", error="No assistant response in chat history")
+        except Exception as exc:
+            logger.error("OpenClaw image turn failed: %s", exc)
+            return OpenClawResponse(content="", error=str(exc))
+
     async def stream_chat(
         self,
         message: str,
-        image_b64: Optional[str] = None,
+        image_b64: str | None = None,
     ) -> AsyncIterator[str]:
         """Stream a response from OpenClaw.
 
@@ -456,6 +652,14 @@ class OpenClawBridge:
         """
         if not self._connected:
             yield "[Error: Not connected to OpenClaw]"
+            return
+
+        if self._use_http or self._use_cli:
+            response = await self.chat(message, image_b64=image_b64)
+            if response.error:
+                yield f"[Error: {response.error}]"
+            elif response.content:
+                yield response.content
             return
 
         final_message = message
@@ -485,12 +689,9 @@ class OpenClawBridge:
             self._run_events[run_id] = event_queue
 
             try:
-                prev_text = ""
                 while True:
                     try:
-                        event = await asyncio.wait_for(
-                            event_queue.get(), timeout=self.timeout
-                        )
+                        event = await asyncio.wait_for(event_queue.get(), timeout=self.timeout)
                         payload = event.get("payload", {})
                         event_name = event.get("event", "")
 
@@ -509,7 +710,7 @@ class OpenClawBridge:
                         elif event_name == "chat" and payload.get("state") == "final":
                             break
 
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         yield "[Error: timeout]"
                         break
             finally:
@@ -524,7 +725,7 @@ class OpenClawBridge:
         """Check if bridge is connected to gateway."""
         return self._connected
 
-    async def get_agent_context(self) -> Optional[str]:
+    async def get_agent_context(self) -> str | None:
         """Fetch the agent's current context, personality, and memory summary.
 
         This asks OpenClaw to provide a summary of:
@@ -570,9 +771,7 @@ class OpenClawBridge:
             logger.error("Failed to get agent context: %s", e)
             return None
 
-    async def sync_conversation(
-        self, user_message: str, assistant_response: str
-    ) -> None:
+    async def sync_conversation(self, user_message: str, assistant_response: str) -> None:
         """Sync a conversation turn back to OpenClaw for memory continuity.
 
         Args:
@@ -599,7 +798,7 @@ class OpenClawBridge:
 
 
 # Global bridge instance (lazy initialization)
-_bridge: Optional[OpenClawBridge] = None
+_bridge: OpenClawBridge | None = None
 
 
 def get_bridge() -> OpenClawBridge:

@@ -2,6 +2,7 @@
 
 # Environment and secrets
 .env
+.private/
 *.env.local
 
 # Python

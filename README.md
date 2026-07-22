@@ -1,11 +1,11 @@
 ---
-title: ClawBody
+title: ClawBody Local
 emoji: 🦞
 colorFrom: red
 colorTo: purple
 sdk: static
 pinned: false
-short_description: OpenClaw AI with robot body and face tracking
+short_description: Asmo's local OpenClaw body for Reachy Mini
 tags:
  - reachy_mini
  - reachy_mini_python_app
@@ -15,7 +15,7 @@ tags:
  - ai-assistant
  - voice-assistant
  - robotics
- - openai-realtime
+ - local-speech
  - conversational-ai
  - physical-ai
  - robot-body
@@ -31,11 +31,14 @@ tags:
  - human-robot-interaction
 ---
 
-# 🦞🤖 ClawBody
+# 🦞🤖 ClawBody Local
+
+See [EMOTIONS.md](EMOTIONS.md) for the complete 81-move Reachy emotion map,
+semantic families, aliases, and selection behavior.
 
 **Give your OpenClaw AI agent a physical robot body!**
 
-ClawBody combines OpenClaw's AI intelligence with Reachy Mini's expressive robot body, using OpenAI's Realtime API for ultra-responsive voice conversation. Your OpenClaw assistant (Clawson) can now see, hear, speak, and move in the physical world.
+ClawBody Local is Asmo-owned infrastructure that combines OpenClaw's AI intelligence with Reachy Mini's expressive robot body. Local STT transcribes the microphone, OpenClaw produces the actual response, and Chatterbox or ElevenLabs gives it a voice.
 
 ![Reachy Mini Dance](https://huggingface.co/spaces/pollen-robotics/reachy_mini_conversation_app/resolve/main/docs/assets/reachy_mini_dance.gif)
 
@@ -48,20 +51,17 @@ ClawBody combines OpenClaw's AI intelligence with Reachy Mini's expressive robot
 
 **The robot looks at you when you speak!**
 
-ClawBody now includes real-time face tracking that makes conversations feel natural and engaging:
+ClawBody uses Reachy Mini 1.9's daemon-side face tracking and microphone-array
+direction-of-arrival support, avoiding a duplicate detector on the OpenClaw host:
 
-- **Automatic Face Detection**: Uses MediaPipe or YOLO to detect faces at 25Hz
+- **Automatic Face Detection**: Runs in Reachy's daemon and blends with expressive movement
 - **Smooth Head Tracking**: Robot smoothly follows your face as you move
-- **Natural Eye Contact**: Maintains engagement during conversation
-- **Graceful Fallback**: Smoothly returns to neutral position when you leave
+- **Sound Tracking**: Turns conservatively toward speech when no face is visible
+- **Visual Questions**: Attaches a current camera frame to OpenClaw when asked what it sees
 
 ```bash
 # Face tracking is enabled by default
 clawbody
-
-# Choose your tracker (MediaPipe is lighter, YOLO is more accurate)
-clawbody --head-tracker mediapipe
-clawbody --head-tracker yolo
 
 # Disable if needed
 clawbody --no-face-tracking
@@ -93,7 +93,7 @@ clawbody --gradio
 ## ✨ Features
 
 - **👁️ Face Tracking**: Robot tracks your face and maintains eye contact during conversation
-- **🎤 Real-time Voice Conversation**: OpenAI Realtime API for sub-second response latency
+- **🎤 Local Voice Pipeline**: Always-hot STT and pluggable Chatterbox/ElevenLabs speech
 - **🧠 OpenClaw Intelligence**: Your responses come from OpenClaw with full tool access
 - **👀 Vision**: See through the robot's camera and describe the environment
 - **💃 Expressive Movements**: Natural head movements, emotions, dances, and audio-driven wobble
@@ -120,9 +120,9 @@ clawbody --gradio
 ┌─────────────────────────────────────────────────┼───────────────┐
 │                      ClawBody                   │               │
 │  ┌─────────────────────────────────────────────┼────────────┐  │
-│  │         OpenAI Realtime API Handler         │            │  │
-│  │  • Speech recognition (Whisper)             │            │  │
-│  │  • Text-to-speech (voices)                 ─┘            │  │
+│  │       Provider-based Voice Pipeline         │            │  │
+│  │  • Local STT + local VAD                    │            │  │
+│  │  • Chatterbox / ElevenLabs TTS             ─┘            │  │
 │  │  • Audio analysis → head wobble                          │  │
 │  └─────────────────────────────────────────────────────────┘  │
 │                           │                                     │
@@ -156,7 +156,8 @@ clawbody --gradio
 - Python 3.11+
 - [Reachy Mini SDK](https://github.com/pollen-robotics/reachy_mini) installed
 - [OpenClaw](https://github.com/openclaw/openclaw) gateway running
-- OpenAI API key with Realtime API access
+- An OpenAI-compatible local transcription endpoint
+- A local Chatterbox endpoint or ElevenLabs API credentials
 
 ## 🚀 Installation
 
@@ -203,6 +204,34 @@ cd clawbody
 /venvs/apps_venv/bin/pip install -e .
 ```
 
+### Native Reachy App configuration
+
+The native app reads deployment environment variables at startup. A packaged
+`.env` file is optional for development only; environment variables supplied by
+the app manager take precedence. Configure at least:
+
+```text
+OPENCLAW_GATEWAY_URL=ws://your-openclaw-gateway:18789
+OPENCLAW_TOKEN=your-gateway-token
+OPENCLAW_AGENT_ID=main
+OPENCLAW_SESSION_KEY=reachy
+STT_BASE_URL=http://your-speech-host:8890/v1
+STT_MODEL=distil-large-v3
+CHATTERBOX_URL=http://your-speech-host:8890/v1/audio/speech
+CHATTERBOX_VOICE=asmo
+ENABLE_WAKE_PHRASE=true
+WAKE_PHRASE=Hey Asmo
+ENABLE_ATTENTION_QUEUE=true
+ATTENTION_API_URL=http://192.168.1.238:18790
+ATTENTION_POLL_SECONDS=60
+```
+
+The native app uses the SDK-owned robot connection and targets the local Reachy
+daemon for camera tracking. It does not require a laptop-side console or a
+second OpenClaw agent. Keep gateway, STT, TTS, and optional ElevenLabs secrets
+in the app manager's secret/environment store; never commit them to `.env`, a
+Space, or the repository.
+
 ## ⚙️ Configuration
 
 1. Copy the example environment file:
@@ -214,21 +243,34 @@ cp .env.example .env
 2. Edit `.env` with your configuration:
 
 ```bash
-# Required
-OPENAI_API_KEY=sk-...your-key...
+# Required local STT
+STT_BASE_URL=http://speech-host.local:8890/v1
+STT_MODEL=distil-large-v3
 
 # OpenClaw Gateway (required for AI responses)
 OPENCLAW_GATEWAY_URL=http://localhost:18789  # or your host IP
 OPENCLAW_TOKEN=your-gateway-token
 OPENCLAW_AGENT_ID=main
 
-# Optional - Customize voice
-OPENAI_VOICE=cedar
+# Local Chatterbox voice profile
+TTS_PROVIDER=chatterbox
+CHATTERBOX_URL=http://speech-host.local:8890/v1/audio/speech
+CHATTERBOX_VOICE=default
 
 # Optional - Face tracking (enabled by default)
 ENABLE_FACE_TRACKING=true
 HEAD_TRACKER_TYPE=mediapipe  # or "yolo" for more accuracy
+
+# Optional - require commands to begin with "Hey Asmo"
+ENABLE_WAKE_PHRASE=true
+WAKE_PHRASE=Hey Asmo
 ```
+
+Wake phrase matching is case-insensitive and tolerates STT punctuation such as
+`Hey, Asmo`. It must occur at the start of each utterance. The phrase is removed
+before the command is sent to OpenClaw; saying only the phrase is treated as a
+greeting. Leave `ENABLE_WAKE_PHRASE=false` for the original always-responsive
+behavior.
 
 ## 🎮 Usage
 
@@ -308,7 +350,7 @@ ClawBody builds on:
 
 - [Pollen Robotics](https://www.pollen-robotics.com/) - Reachy Mini robot, SDK, and simulator
 - [OpenClaw](https://github.com/openclaw/openclaw) - AI assistant framework (Clawson!)
-- [OpenAI](https://openai.com/) - Realtime API for voice I/O
+- [Resemble AI Chatterbox](https://github.com/resemble-ai/chatterbox) - local speech synthesis
 - [MuJoCo](https://mujoco.org/) - Physics simulation engine
 - [pollen-robotics/reachy_mini_conversation_app](https://huggingface.co/spaces/pollen-robotics/reachy_mini_conversation_app) - Movement and audio systems
 

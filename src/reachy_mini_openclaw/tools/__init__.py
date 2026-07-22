@@ -1,6 +1,6 @@
 """Tool definitions for Reachy Mini OpenClaw.
 
-These tools are exposed to the OpenAI Realtime API and allow the assistant
+These tools are exposed through the body integration and allow the assistant
 to control the robot and interact with the environment.
 """
 
