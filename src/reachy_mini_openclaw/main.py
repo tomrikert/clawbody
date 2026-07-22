@@ -17,7 +17,6 @@ Usage:
 """
 
 import os
-import sys
 import time
 import asyncio
 import base64
@@ -28,10 +27,11 @@ from pathlib import Path
 from typing import Any, Optional
 
 from dotenv import load_dotenv
+from reachy_mini import ReachyMiniApp
 
-# Load environment from project root (override=True ensures .env takes precedence)
+# Load local development settings without overriding deployment-injected env.
 _project_root = Path(__file__).parent.parent.parent
-load_dotenv(_project_root / ".env", override=True)
+load_dotenv(_project_root / ".env", override=False)
 
 logger = logging.getLogger(__name__)
 
@@ -117,8 +117,8 @@ Examples:
     parser.add_argument(
         "--gateway-url",
         type=str,
-        default=os.getenv("OPENCLAW_GATEWAY_URL", "ws://localhost:18789"),
-        help="OpenClaw gateway URL (from OPENCLAW_GATEWAY_URL env or default)"
+        default=os.getenv("OPENCLAW_GATEWAY_URL", ""),
+        help="OpenClaw gateway URL (required unless supplied by environment)"
     )
     parser.add_argument(
         "--no-camera",
@@ -161,7 +161,7 @@ class ClawBodyCore:
     
     def __init__(
         self,
-        gateway_url: str = "ws://localhost:18789",
+        gateway_url: str = "",
         robot_name: Optional[str] = None,
         robot_host: Optional[str] = None,
         robot_port: Optional[int] = None,
@@ -205,11 +205,11 @@ class ClawBodyCore:
         self._owns_robot = robot is None
         
         # Validate configuration
-        errors = config.validate()
+        errors = config.validate(gateway_url=self.gateway_url)
         if errors:
             for error in errors:
                 logger.error("Config error: %s", error)
-            sys.exit(1)
+            raise ValueError("Invalid ClawBody configuration")
         
         # Connect to robot
         if robot is not None:
@@ -229,10 +229,10 @@ class ClawBodyCore:
             except TimeoutError as e:
                 logger.error("Connection timeout: %s", e)
                 logger.error("Check that the robot is powered on and reachable.")
-                sys.exit(1)
+                raise RuntimeError("Reachy Mini connection timed out") from e
             except Exception as e:
                 logger.error("Robot connection failed: %s", e)
-                sys.exit(1)
+                raise RuntimeError("Reachy Mini connection failed") from e
                 
             logger.info("Connected to robot: %s", self.robot.client.get_status())
         
@@ -279,7 +279,11 @@ class ClawBodyCore:
                 reachy_mini=self.robot,
                 head_tracker=self.head_tracker,
                 daemon_tracking=daemon_tracking,
-                daemon_url=f"http://{robot_host or config.ROBOT_HOST}:{robot_port or config.ROBOT_PORT}",
+                daemon_url=(
+                    "http://127.0.0.1:8000"
+                    if robot is not None
+                    else f"http://{robot_host or config.ROBOT_HOST}:{robot_port or config.ROBOT_PORT}"
+                ),
                 tracking_weight=config.FACE_TRACKING_WEIGHT,
                 sound_tracking=config.ENABLE_SOUND_TRACKING,
             )
@@ -351,7 +355,24 @@ class ClawBodyCore:
             ),
             attention_provider=self.camera_worker,
             require_hardware_speech=config.VAD_REQUIRE_HARDWARE_SPEECH,
+            wake_phrase_enabled=config.ENABLE_WAKE_PHRASE,
+            wake_phrase=config.WAKE_PHRASE,
         )
+
+        self.attention_controller = None
+        if config.ENABLE_ATTENTION_QUEUE:
+            from reachy_mini_openclaw.attention import AttentionClient, AttentionController
+
+            self.attention_controller = AttentionController(
+                robot=self.robot,
+                movement_manager=self.movement_manager,
+                handler=self.handler,
+                client=AttentionClient(
+                    config.ATTENTION_API_URL,
+                    config.OPENCLAW_TOKEN or "",
+                ),
+                poll_seconds=config.ATTENTION_POLL_SECONDS,
+            )
         
         # State
         self._stop_event = asyncio.Event()
@@ -451,12 +472,23 @@ class ClawBodyCore:
         """Read audio from robot microphone and send to handler."""
         input_sr = self.robot.media.get_input_audio_samplerate()
         logger.info("Recording at %d Hz", input_sr)
-        
+        failures = 0
         while not self._should_stop():
-            audio_frame = self.robot.media.get_audio_sample()
-            if audio_frame is not None:
-                await self.handler.receive((input_sr, audio_frame))
-            await asyncio.sleep(0.01)
+            try:
+                audio_frame = self.robot.media.get_audio_sample()
+                if audio_frame is not None:
+                    await self.handler.receive((input_sr, audio_frame))
+                failures = 0
+                await asyncio.sleep(0.01)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                failures += 1
+                if failures > 5:
+                    raise RuntimeError("Reachy microphone loop failed repeatedly") from exc
+                delay = min(0.25 * (2 ** (failures - 1)), 4.0)
+                logger.warning("Reachy microphone unavailable; retrying in %.2fs", delay)
+                await asyncio.sleep(delay)
             
     async def play_loop(self) -> None:
         """Play audio from handler through robot speakers."""
@@ -464,37 +496,44 @@ class ClawBodyCore:
 
         output_sr = self.robot.media.get_output_audio_samplerate()
         logger.info("Playing at %d Hz with %.2fx software gain", output_sr, self.audio_output_gain)
-        
+        failures = 0
         while not self._should_stop():
-            output = await self.handler.emit()
-            if output is not None:
-                if isinstance(output, tuple):
-                    input_sr, audio_data = output
+            try:
+                output = await self.handler.emit()
+                if output is not None:
+                    if isinstance(output, tuple):
+                        input_sr, audio_data = output
+                        # Feed the speech animator at playback time, not synthesis
+                        # time, so movement stays synchronized with the speaker.
+                        self.head_wobbler.feed(
+                            base64.b64encode(audio_data.astype("int16").tobytes()).decode("ascii")
+                        )
 
-                    # Feed the speech animator at playback time, not synthesis
-                    # time, so movement stays synchronized with the speaker.
-                    self.head_wobbler.feed(
-                        base64.b64encode(audio_data.astype("int16").tobytes()).decode("ascii")
-                    )
-                    
-                    # Convert provider PCM16 to normalized float32.
-                    audio_data = audio_data.flatten().astype("float32") / 32768.0
-                    
-                    # The old donor project attenuated every response to 50%,
-                    # independently of Reachy's console volume. Preserve the
-                    # synthesized level by default and permit controlled boost.
-                    audio_data = apply_output_gain(audio_data, self.audio_output_gain)
-                    
-                    # Resample if needed
-                    if input_sr != output_sr:
-                        from scipy.signal import resample
-                        num_samples = int(len(audio_data) * output_sr / input_sr)
-                        audio_data = resample(audio_data, num_samples).astype("float32")
-                        
-                    self.robot.media.push_audio_sample(audio_data)
-                # Otherwise it is a transcript event for a future UI consumer.
-                
-            await asyncio.sleep(0.01)
+                        # Convert provider PCM16 to normalized float32.
+                        audio_data = audio_data.flatten().astype("float32") / 32768.0
+
+                        # Preserve synthesized level by default and permit a
+                        # controlled boost without clipping.
+                        audio_data = apply_output_gain(audio_data, self.audio_output_gain)
+
+                        if input_sr != output_sr:
+                            from scipy.signal import resample
+                            num_samples = int(len(audio_data) * output_sr / input_sr)
+                            audio_data = resample(audio_data, num_samples).astype("float32")
+
+                        self.robot.media.push_audio_sample(audio_data)
+                    # Otherwise it is a transcript event for a future UI consumer.
+                failures = 0
+                await asyncio.sleep(0.01)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                failures += 1
+                if failures > 5:
+                    raise RuntimeError("Reachy speaker loop failed repeatedly") from exc
+                delay = min(0.25 * (2 ** (failures - 1)), 4.0)
+                logger.warning("Reachy speaker unavailable; retrying in %.2fs", delay)
+                await asyncio.sleep(delay)
             
     async def run(self) -> None:
         """Run the main application loop."""
@@ -518,7 +557,7 @@ class ClawBodyCore:
                 duration=2.0,
                 body_yaw=0.0,
             )
-            time.sleep(2)  # Wait for goto to complete
+            await asyncio.sleep(2)  # Keep native stop handling responsive.
             logger.info("Robot at neutral position with motors enabled")
         except Exception as e:
             logger.error("Failed to initialize robot pose: %s", e)
@@ -547,7 +586,7 @@ class ClawBodyCore:
         logger.info("Starting audio...")
         self.robot.media.start_recording()
         self.robot.media.start_playing()
-        time.sleep(1)  # Let pipelines initialize
+        await asyncio.sleep(1)  # Let pipelines initialize without blocking stop handling.
         
         logger.info("Ready! Speak to me...")
         
@@ -560,19 +599,58 @@ class ClawBodyCore:
             asyncio.create_task(self.record_loop(), name="record-loop"),
             asyncio.create_task(self.play_loop(), name="play-loop"),
         ]
+        if self.attention_controller is not None:
+            self._tasks.append(
+                asyncio.create_task(self.attention_controller.run(), name="attention-loop")
+            )
         
+        stop_watcher = asyncio.create_task(self._watch_external_stop(), name="external-stop-watcher")
+        self._tasks.append(stop_watcher)
+
         try:
-            await asyncio.gather(*self._tasks)
+            done, pending = await asyncio.wait(
+                self._tasks,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if stop_watcher in done:
+                logger.info("External stop requested")
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            # Do not hide an unexpected task failure from the Reachy app
+            # manager; it must be able to record the failure and restart us.
+            await asyncio.gather(*done)
         except asyncio.CancelledError:
             logger.info("Tasks cancelled")
-            
-    def stop(self) -> None:
-        """Stop everything."""
+            raise
+
+    async def _watch_external_stop(self) -> None:
+        """Bridge Reachy's threading stop event into the asyncio lifecycle."""
+        if self._external_stop_event is None:
+            await self._stop_event.wait()
+            return
+        # Poll instead of delegating Event.wait() to the default executor.
+        # Cancelling asyncio.to_thread() cannot stop the underlying blocking
+        # thread, which could survive app shutdown indefinitely.
+        while not self._external_stop_event.is_set() and not self._stop_event.is_set():
+            await asyncio.sleep(0.1)
+        self._stop_event.set()
+
+    async def stop(self) -> None:
+        """Stop everything exactly once."""
+        if getattr(self, "_shutdown_complete", False):
+            return
+        self._shutdown_complete = True
         logger.info("Stopping...")
         self._stop_event.set()
         
         # Cancel tasks
+        if self.attention_controller is not None:
+            await self.attention_controller.stop()
+        current_task = asyncio.current_task()
         for task in self._tasks:
+            if task is current_task:
+                continue
             if not task.done():
                 task.cancel()
                 
@@ -591,9 +669,7 @@ class ClawBodyCore:
         # Disconnect OpenClaw bridge
         if self.openclaw_bridge is not None:
             try:
-                asyncio.get_event_loop().run_until_complete(
-                    self.openclaw_bridge.disconnect()
-                )
+                await self.openclaw_bridge.disconnect()
             except Exception as e:
                 logger.debug("OpenClaw disconnect: %s", e)
         
@@ -608,7 +684,7 @@ class ClawBodyCore:
         logger.info("Stopped")
 
 
-class ClawBodyApp:
+class ReachyMiniOpenclaw(ReachyMiniApp):
     """ClawBody - Reachy Mini Apps entry point.
     
     This class allows ClawBody to be installed and run from
@@ -628,21 +704,26 @@ class ClawBodyApp:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         
-        gateway_url = os.getenv("OPENCLAW_GATEWAY_URL", "ws://localhost:18789")
+        gateway_url = os.getenv("OPENCLAW_GATEWAY_URL", "")
         
-        app = ClawBodyCore(
-            gateway_url=gateway_url,
-            robot=reachy_mini,
-            external_stop_event=stop_event,
-        )
-        
+        app = None
         try:
+            app = ClawBodyCore(
+                gateway_url=gateway_url,
+                robot=reachy_mini,
+                external_stop_event=stop_event,
+            )
             loop.run_until_complete(app.run())
-        except Exception as e:
-            logger.error("Error running app: %s", e)
         finally:
-            app.stop()
+            if app is not None:
+                loop.run_until_complete(app.stop())
+            asyncio.set_event_loop(None)
             loop.close()
+
+
+# Backwards-compatible import for older local launchers. The package entry
+# point intentionally uses the official ReachyMiniOpenclaw name above.
+ClawBodyApp = ReachyMiniOpenclaw
 
 
 def main() -> None:
@@ -690,12 +771,16 @@ def main() -> None:
             enable_openclaw=not args.no_openclaw,
         )
         
+        async def run_and_stop() -> None:
+            try:
+                await app.run()
+            finally:
+                await app.stop()
+
         try:
-            asyncio.run(app.run())
+            asyncio.run(run_and_stop())
         except KeyboardInterrupt:
             logger.info("Interrupted")
-        finally:
-            app.stop()
 
 
 if __name__ == "__main__":

@@ -7,8 +7,9 @@ This module provides a web interface for:
 - Manual control options
 """
 
-import os
+import asyncio
 import logging
+import threading
 from typing import Optional
 
 import gradio as gr
@@ -17,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 def launch_gradio(
-    gateway_url: str = "ws://localhost:18789",
+    gateway_url: str = "",
     robot_name: Optional[str] = None,
     robot_host: Optional[str] = None,
     robot_port: Optional[int] = None,
@@ -47,19 +48,21 @@ def launch_gradio(
     
     # State
     app_instance = None
+    app_loop = None
     
     def start_conversation():
         """Start the conversation."""
-        nonlocal app_instance
-        
+        nonlocal app_instance, app_loop
+
         from reachy_mini_openclaw.main import ClawBodyCore
-        import asyncio
-        import threading
         
         if app_instance is not None:
             return "Already running"
         
         try:
+            config.ENABLE_FACE_TRACKING = enable_face_tracking
+            if head_tracker_type is not None:
+                config.HEAD_TRACKER_TYPE = head_tracker_type
             app_instance = ClawBodyCore(
                 gateway_url=gateway_url,
                 robot_name=robot_name,
@@ -68,22 +71,29 @@ def launch_gradio(
                 robot_connection_mode=robot_connection_mode,
                 enable_camera=enable_camera,
                 enable_openclaw=enable_openclaw,
-                enable_face_tracking=enable_face_tracking,
-                head_tracker_type=head_tracker_type,
             )
             
             # Run in background thread
-            def run_app():
+            def run_app(instance):
+                nonlocal app_instance, app_loop
                 loop = asyncio.new_event_loop()
+                app_loop = loop
                 asyncio.set_event_loop(loop)
                 try:
-                    loop.run_until_complete(app_instance.run())
+                    loop.run_until_complete(instance.run())
+                except asyncio.CancelledError:
+                    logger.info("App stopped")
                 except Exception as e:
                     logger.error("App error: %s", e)
                 finally:
+                    loop.run_until_complete(instance.stop())
+                    if app_instance is instance:
+                        app_instance = None
+                    app_loop = None
+                    asyncio.set_event_loop(None)
                     loop.close()
             
-            thread = threading.Thread(target=run_app, daemon=True)
+            thread = threading.Thread(target=run_app, args=(app_instance,), daemon=True)
             thread.start()
             
             return "Started successfully"
@@ -92,13 +102,16 @@ def launch_gradio(
     
     def stop_conversation():
         """Stop the conversation."""
-        nonlocal app_instance
+        nonlocal app_instance, app_loop
         
         if app_instance is None:
             return "Not running"
         
         try:
-            app_instance.stop()
+            if app_loop is None or not app_loop.is_running():
+                return "App is still starting"
+            future = asyncio.run_coroutine_threadsafe(app_instance.stop(), app_loop)
+            future.result(timeout=10)
             app_instance = None
             return "Stopped"
         except Exception as e:

@@ -284,6 +284,7 @@ class MovementManager:
         self._processing_start_time = 0.0
         self._thinking_amplitude = 0.0  # 0..1 envelope for smooth fade in/out
         self._thinking_antenna_offsets: Tuple[float, float] = (0.0, 0.0)
+        self._attention_pending = False
         
         # Shared state lock
         self._shared_lock = threading.Lock()
@@ -316,6 +317,10 @@ class MovementManager:
         Face tracking continues underneath since this is additive.
         """
         self._command_queue.put(("set_processing", processing))
+
+    def set_attention_pending(self, pending: bool) -> None:
+        """Hold one antenna in a quiet, visible notification pose."""
+        self._command_queue.put(("set_attention_pending", pending))
         
     def is_idle(self) -> bool:
         """Check if robot has been idle. Thread-safe."""
@@ -435,6 +440,12 @@ class MovementManager:
                 # Amplitude will decay smoothly in _update_thinking_offsets
                 self.state.update_activity()
                 logger.debug("Processing ended - thinking animation decaying")
+        elif cmd == "set_attention_pending":
+            desired = bool(payload)
+            if self._attention_pending != desired:
+                self._attention_pending = desired
+                self.state.update_activity()
+                logger.info("Attention indicator %s", "enabled" if desired else "cleared")
                 
     def _manage_move_queue(self, current_time: float) -> None:
         """Advance the move queue."""
@@ -573,6 +584,11 @@ class MovementManager:
         """Blend antennas with listening freeze state."""
         if self._is_listening:
             return self._listening_antennas
+
+        if self._attention_pending and not self._processing:
+            # A stable asymmetric "bookmark" pose: visible across the room,
+            # silent, and distinct from breathing/thinking animations.
+            target = (float(np.deg2rad(-42)), float(np.deg2rad(10)))
             
         # Blend back from freeze
         blend = min(1.0, self._antenna_unfreeze_blend + self.target_period / self._antenna_blend_duration)
@@ -680,6 +696,7 @@ class MovementManager:
             "is_listening": self._is_listening,
             "breathing_active": self._breathing_active,
             "processing": self._processing,
+            "attention_pending": self._attention_pending,
             "thinking_amplitude": round(self._thinking_amplitude, 3),
             "last_commanded_pose": {
                 "head": self._last_commanded_pose[0].tolist(),

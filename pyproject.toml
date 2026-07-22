@@ -3,16 +3,17 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "clawbody"
-version = "0.1.0"
-description = "Give an OpenClaw agent a Reachy Mini body with local STT, pluggable TTS, and expressive movement."
+name = "clawbodylocal"
+version = "0.2.0"
+description = "Asmo's local OpenClaw body for Reachy Mini, with local STT, pluggable TTS, and expressive movement."
 readme = "README.md"
 license = {text = "Apache-2.0"}
 requires-python = ">=3.11"
 authors = [
-    {name = "Tom", email = "tom@example.com"}
+    {name = "Asmo", email = "stanme@asmo.bot"}
 ]
 keywords = [
+    "clawbodylocal",
     "clawbody",
     "reachy-mini",
     "openclaw",
@@ -45,6 +46,9 @@ dependencies = [
     "numpy",
     "scipy",
     "pillow>=10",
+    # Native apps share Reachy's apps venv. Pin the validated SDK in the main
+    # dependency set so installing the dance library cannot downgrade it.
+    "reachy-mini==1.9.0",
     "reachy-mini-dances-library>=0.2.1",
     
     # OpenClaw gateway client (WebSocket protocol)
@@ -56,10 +60,6 @@ dependencies = [
     # Environment
     "python-dotenv",
 ]
-
-# Note: reachy-mini SDK must be installed separately from the robot or GitHub:
-# pip install git+https://github.com/pollen-robotics/reachy_mini.git
-# Or on the robot, it's pre-installed.
 
 [project.optional-dependencies]
 robot = [
@@ -99,16 +99,18 @@ dev = [
 ]
 
 [project.scripts]
+clawbodylocal = "reachy_mini_openclaw.main:main"
+# Compatibility alias for existing local launchers and operator muscle memory.
 clawbody = "reachy_mini_openclaw.main:main"
 
 [project.entry-points."reachy_mini_apps"]
-clawbody = "reachy_mini_openclaw.main:ClawBodyApp"
+clawbodylocal = "reachy_mini_openclaw.main:ReachyMiniOpenclaw"
 
 [project.urls]
-Homepage = "https://github.com/yourusername/clawbody"
-Documentation = "https://github.com/yourusername/clawbody#readme"
-Repository = "https://github.com/yourusername/clawbody"
-Issues = "https://github.com/yourusername/clawbody/issues"
+Homepage = "https://huggingface.co/spaces/asmolebot/clawbodylocal"
+Documentation = "https://github.com/asmolebot/clawbody#readme"
+Repository = "https://github.com/asmolebot/clawbody"
+Issues = "https://github.com/asmolebot/clawbody/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]

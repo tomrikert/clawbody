@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from difflib import SequenceMatcher
 import logging
 import re
 import time
@@ -29,6 +30,43 @@ _VISION_REQUESTS = (
 
 def needs_vision(text: str) -> bool:
     return any(pattern.search(text) for pattern in _VISION_REQUESTS)
+
+
+def command_after_wake_phrase(text: str, wake_phrase: str) -> str | None:
+    """Return the command after a spoken wake phrase, or None if absent.
+
+    Matching is case-insensitive, restricted to the start of the transcript,
+    and tolerant of punctuation inserted by STT (for example, "Hey, Asmo").
+    """
+    words = re.findall(r"[^\W_]+", wake_phrase, flags=re.UNICODE)
+    if not words:
+        return None
+    spoken = list(re.finditer(r"[^\W_]+", text, flags=re.UNICODE))
+    if len(spoken) < len(words):
+        return None
+
+    for expected, observed_match in zip(words, spoken[: len(words)], strict=True):
+        observed = observed_match.group(0)
+        expected_folded = expected.casefold()
+        observed_folded = observed.casefold()
+        if observed_folded == expected_folded:
+            continue
+        # Short wake words are occasionally normalized by Whisper ("hey" ->
+        # "hi"). Names are even more vulnerable ("Asmo" -> "asthma").
+        # Keep the fuzzy allowance narrow: it only applies to the leading wake
+        # phrase tokens and still requires the entire configured phrase.
+        if expected_folded == "hey" and observed_folded == "hi":
+            continue
+        threshold = 0.60 if len(expected_folded) >= 4 else 0.75
+        if (
+            abs(len(expected_folded) - len(observed_folded)) > 2
+            or SequenceMatcher(None, expected_folded, observed_folded).ratio() < threshold
+        ):
+            return None
+
+    return re.sub(
+        r"^[\s,;:!?.\-–—]+", "", text[spoken[len(words) - 1].end() :]
+    ).strip()
 
 
 @dataclass(frozen=True)
@@ -155,6 +193,8 @@ class ConversationHandler:
         output_chunk_samples: int = 2048,
         attention_provider: Any = None,
         require_hardware_speech: bool = True,
+        wake_phrase_enabled: bool = False,
+        wake_phrase: str = "Hey Asmo",
     ) -> None:
         self.stt = stt
         self.tts = tts
@@ -164,10 +204,47 @@ class ConversationHandler:
         self.output_chunk_samples = output_chunk_samples
         self.attention_provider = attention_provider
         self.require_hardware_speech = require_hardware_speech
+        self.wake_phrase_enabled = wake_phrase_enabled
+        self.wake_phrase = wake_phrase
         self.output_queue: asyncio.Queue[tuple[int, NDArray[np.int16]] | dict[str, str]] = asyncio.Queue()
         self._utterances: asyncio.Queue[Utterance] = asyncio.Queue(maxsize=2)
         self._shutdown_requested = False
         self._ignore_input_until = 0.0
+        self._turn_lock = asyncio.Lock()
+
+    async def _retry_async(self, operation: Any, label: str, attempts: int = 3) -> Any:
+        """Retry a transient network/provider operation with bounded backoff."""
+        delay = 0.25
+        for attempt in range(1, attempts + 1):
+            try:
+                return await operation()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                if attempt == attempts:
+                    raise
+                logger.warning(
+                    "%s unavailable; retrying in %.2fs (%d/%d)",
+                    label,
+                    delay,
+                    attempt,
+                    attempts - 1,
+                )
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 2.0)
+        raise AssertionError("retry loop exhausted")
+
+    async def _ensure_gateway(self) -> None:
+        """Reconnect the gateway without making a failed turn fatal immediately."""
+        if self.openclaw_bridge.is_connected:
+            return
+
+        async def connect() -> bool:
+            if await self.openclaw_bridge.connect():
+                return True
+            raise RuntimeError("OpenClaw gateway is unavailable")
+
+        await self._retry_async(connect, "OpenClaw gateway")
 
     async def start_up(self) -> None:
         while not self._shutdown_requested:
@@ -213,19 +290,34 @@ class ConversationHandler:
             await self._utterances.put(utterance)
 
     async def _process_utterance(self, utterance: Utterance) -> None:
+        async with self._turn_lock:
+            await self._process_utterance_locked(utterance)
+
+    async def _process_utterance_locked(self, utterance: Utterance) -> None:
         turn_started = time.monotonic()
         self.deps.movement_manager.set_processing(True)
-        transcript = await self.stt.transcribe(utterance.samples, utterance.sample_rate)
+        transcript = await self._retry_async(
+            lambda: self.stt.transcribe(utterance.samples, utterance.sample_rate),
+            "STT service",
+        )
         stt_done = time.monotonic()
         if not transcript:
             self.deps.movement_manager.set_processing(False)
             return
+        transcript = transcript.strip()
+        if self.wake_phrase_enabled:
+            command = command_after_wake_phrase(transcript, self.wake_phrase)
+            if command is None:
+                logger.info("Ignored utterance without configured wake phrase: %r", transcript)
+                self.deps.movement_manager.set_processing(False)
+                return
+            # A wake phrase by itself remains a valid greeting. When a command
+            # follows it, keep the conversational session free of boilerplate.
+            transcript = command or transcript
         logger.info("User: %s", transcript)
         await self.output_queue.put({"role": "user", "content": transcript})
 
-        if not self.openclaw_bridge.is_connected:
-            if not await self.openclaw_bridge.connect():
-                raise RuntimeError("OpenClaw gateway is unavailable")
+        await self._ensure_gateway()
         motion_catalog = getattr(self.deps, "motion_catalog", None)
         motion_hint = f" {motion_catalog.response_hint()}" if motion_catalog is not None else ""
         image_b64 = None
@@ -260,7 +352,7 @@ class ConversationHandler:
             raise RuntimeError("OpenClaw returned an empty response")
 
         logger.info("Assistant: %s", text)
-        audio = await self.tts.synthesize(text)
+        audio = await self._retry_async(lambda: self.tts.synthesize(text), "TTS service")
         tts_done = time.monotonic()
         # Reachy's microphone hears its own speaker over the remote WebRTC
         # stream. Suppress VAD for the synthesized duration plus a short room-
@@ -291,6 +383,24 @@ class ConversationHandler:
             tts_done - openclaw_done,
             tts_done - turn_started,
         )
+
+    async def speak_text(self, text: str) -> float:
+        """Speak trusted local notification text without creating an agent turn."""
+        async with self._turn_lock:
+            self.deps.movement_manager.set_processing(False)
+            audio = await self._retry_async(lambda: self.tts.synthesize(text), "TTS service")
+            duration = audio.samples.size / audio.sample_rate
+            self._ignore_input_until = max(
+                self._ignore_input_until,
+                time.monotonic() + duration + 0.8,
+            )
+            self.vad.reset()
+            self.deps.movement_manager.set_listening(False)
+            await self.output_queue.put({"role": "assistant", "content": text})
+            for offset in range(0, audio.samples.size, self.output_chunk_samples):
+                chunk = audio.samples[offset : offset + self.output_chunk_samples]
+                await self.output_queue.put((audio.sample_rate, chunk.reshape(1, -1)))
+            return duration
 
     def _clear_audio_output(self) -> None:
         retained: list[dict[str, str]] = []

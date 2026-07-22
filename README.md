@@ -1,11 +1,11 @@
 ---
-title: ClawBody
+title: ClawBody Local
 emoji: 🦞
 colorFrom: red
 colorTo: purple
 sdk: static
 pinned: false
-short_description: OpenClaw AI with robot body and face tracking
+short_description: Asmo's local OpenClaw body for Reachy Mini
 tags:
  - reachy_mini
  - reachy_mini_python_app
@@ -31,14 +31,14 @@ tags:
  - human-robot-interaction
 ---
 
-# 🦞🤖 ClawBody
+# 🦞🤖 ClawBody Local
 
 See [EMOTIONS.md](EMOTIONS.md) for the complete 81-move Reachy emotion map,
 semantic families, aliases, and selection behavior.
 
 **Give your OpenClaw AI agent a physical robot body!**
 
-ClawBody combines OpenClaw's AI intelligence with Reachy Mini's expressive robot body. Local STT transcribes the microphone, OpenClaw produces the actual response, and Chatterbox or ElevenLabs gives it a voice.
+ClawBody Local is Asmo-owned infrastructure that combines OpenClaw's AI intelligence with Reachy Mini's expressive robot body. Local STT transcribes the microphone, OpenClaw produces the actual response, and Chatterbox or ElevenLabs gives it a voice.
 
 ![Reachy Mini Dance](https://huggingface.co/spaces/pollen-robotics/reachy_mini_conversation_app/resolve/main/docs/assets/reachy_mini_dance.gif)
 
@@ -204,6 +204,31 @@ cd clawbody
 /venvs/apps_venv/bin/pip install -e .
 ```
 
+### Native Reachy App configuration
+
+The native app reads deployment environment variables at startup. A packaged
+`.env` file is optional for development only; environment variables supplied by
+the app manager take precedence. Configure at least:
+
+```text
+OPENCLAW_GATEWAY_URL=ws://your-openclaw-gateway:18789
+OPENCLAW_TOKEN=your-gateway-token
+OPENCLAW_AGENT_ID=main
+OPENCLAW_SESSION_KEY=reachy
+STT_BASE_URL=http://your-speech-host:8890/v1
+STT_MODEL=distil-large-v3
+CHATTERBOX_URL=http://your-speech-host:8890/v1/audio/speech
+CHATTERBOX_VOICE=asmo
+ENABLE_WAKE_PHRASE=true
+WAKE_PHRASE=Hey Asmo
+```
+
+The native app uses the SDK-owned robot connection and targets the local Reachy
+daemon for camera tracking. It does not require a laptop-side console or a
+second OpenClaw agent. Keep gateway, STT, TTS, and optional ElevenLabs secrets
+in the app manager's secret/environment store; never commit them to `.env`, a
+Space, or the repository.
+
 ## ⚙️ Configuration
 
 1. Copy the example environment file:
@@ -232,7 +257,17 @@ CHATTERBOX_VOICE=default
 # Optional - Face tracking (enabled by default)
 ENABLE_FACE_TRACKING=true
 HEAD_TRACKER_TYPE=mediapipe  # or "yolo" for more accuracy
+
+# Optional - require commands to begin with "Hey Asmo"
+ENABLE_WAKE_PHRASE=true
+WAKE_PHRASE=Hey Asmo
 ```
+
+Wake phrase matching is case-insensitive and tolerates STT punctuation such as
+`Hey, Asmo`. It must occur at the start of each utterance. The phrase is removed
+before the command is sent to OpenClaw; saying only the phrase is treated as a
+greeting. Leave `ENABLE_WAKE_PHRASE=false` for the original always-responsive
+behavior.
 
 ## 🎮 Usage
 

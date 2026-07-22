@@ -37,7 +37,7 @@ class Config:
 
     # Speech-to-text. The endpoint follows OpenAI's multipart
     # /v1/audio/transcriptions contract, but can be entirely local.
-    STT_BASE_URL: str = field(default_factory=lambda: os.getenv("STT_BASE_URL", "http://speech-host.local:8890/v1"))
+    STT_BASE_URL: str = field(default_factory=lambda: os.getenv("STT_BASE_URL", ""))
     STT_API_KEY: Optional[str] = field(default_factory=lambda: os.getenv("STT_API_KEY"))
     STT_MODEL: str = field(default_factory=lambda: os.getenv("STT_MODEL", "distil-large-v3"))
     STT_LANGUAGE: str = field(default_factory=lambda: os.getenv("STT_LANGUAGE", "en"))
@@ -46,7 +46,7 @@ class Config:
     # Text-to-speech. Chatterbox is primary; ElevenLabs can be enabled as a
     # fallback without changing the conversational pipeline.
     TTS_PROVIDER: str = field(default_factory=lambda: os.getenv("TTS_PROVIDER", "chatterbox").lower())
-    CHATTERBOX_URL: str = field(default_factory=lambda: os.getenv("CHATTERBOX_URL", "http://speech-host.local:8890/v1/audio/speech"))
+    CHATTERBOX_URL: str = field(default_factory=lambda: os.getenv("CHATTERBOX_URL", ""))
     CHATTERBOX_API_KEY: Optional[str] = field(default_factory=lambda: os.getenv("CHATTERBOX_API_KEY"))
     CHATTERBOX_VOICE: str = field(default_factory=lambda: os.getenv("CHATTERBOX_VOICE", "asmo"))
     CHATTERBOX_SAMPLE_RATE: int = field(default_factory=lambda: int(os.getenv("CHATTERBOX_SAMPLE_RATE", "24000")))
@@ -67,9 +67,20 @@ class Config:
     VAD_MIN_SPEECH_MS: int = field(default_factory=lambda: int(os.getenv("VAD_MIN_SPEECH_MS", "300")))
     VAD_MAX_SPEECH_SECONDS: float = field(default_factory=lambda: float(os.getenv("VAD_MAX_SPEECH_SECONDS", "20")))
     VAD_REQUIRE_HARDWARE_SPEECH: bool = field(default_factory=lambda: os.getenv("VAD_REQUIRE_HARDWARE_SPEECH", "true").lower() == "true")
+
+    # Optional transcript-level wake phrase gate. Audio is still transcribed
+    # locally, but only utterances beginning with the phrase reach OpenClaw.
+    ENABLE_WAKE_PHRASE: bool = field(default_factory=lambda: os.getenv("ENABLE_WAKE_PHRASE", "false").lower() == "true")
+    WAKE_PHRASE: str = field(default_factory=lambda: os.getenv("WAKE_PHRASE", "Hey Asmo"))
+
+    # Hourly mail attention queue. The broker is gateway-local and uses the
+    # same bearer token already provisioned for OpenClaw.
+    ENABLE_ATTENTION_QUEUE: bool = field(default_factory=lambda: os.getenv("ENABLE_ATTENTION_QUEUE", "false").lower() == "true")
+    ATTENTION_API_URL: str = field(default_factory=lambda: os.getenv("ATTENTION_API_URL", ""))
+    ATTENTION_POLL_SECONDS: float = field(default_factory=lambda: float(os.getenv("ATTENTION_POLL_SECONDS", "60")))
     
     # OpenClaw Gateway Configuration
-    OPENCLAW_GATEWAY_URL: str = field(default_factory=lambda: os.getenv("OPENCLAW_GATEWAY_URL", "ws://localhost:18789"))
+    OPENCLAW_GATEWAY_URL: str = field(default_factory=lambda: os.getenv("OPENCLAW_GATEWAY_URL", ""))
     OPENCLAW_TOKEN: Optional[str] = field(default_factory=_gateway_token)
     OPENCLAW_AGENT_ID: str = field(default_factory=lambda: os.getenv("OPENCLAW_AGENT_ID", "main"))
     # Spoken body turns should feel immediate. "off" is OpenClaw's lowest-
@@ -106,11 +117,13 @@ class Config:
     # Custom Profile (for personality customization)
     CUSTOM_PROFILE: Optional[str] = field(default_factory=lambda: os.getenv("REACHY_MINI_CUSTOM_PROFILE"))
     
-    def validate(self) -> list[str]:
+    def validate(self, gateway_url: Optional[str] = None) -> list[str]:
         """Validate configuration and return list of errors."""
         errors = []
         if not self.STT_BASE_URL:
             errors.append("STT_BASE_URL is required")
+        if not (gateway_url or self.OPENCLAW_GATEWAY_URL):
+            errors.append("OPENCLAW_GATEWAY_URL is required")
         if self.TTS_PROVIDER not in {"chatterbox", "elevenlabs"}:
             errors.append("TTS_PROVIDER must be 'chatterbox' or 'elevenlabs'")
         if self.TTS_PROVIDER == "chatterbox" and not self.CHATTERBOX_URL:
@@ -122,6 +135,14 @@ class Config:
                 errors.append("ELEVENLABS_VOICE_ID is required for ElevenLabs TTS")
         if self.AUDIO_OUTPUT_GAIN <= 0:
             errors.append("AUDIO_OUTPUT_GAIN must be greater than zero")
+        if self.ENABLE_WAKE_PHRASE and not self.WAKE_PHRASE.strip():
+            errors.append("WAKE_PHRASE must not be empty when wake phrase gating is enabled")
+        if self.ENABLE_ATTENTION_QUEUE and not self.ATTENTION_API_URL:
+            errors.append("ATTENTION_API_URL is required when attention queue is enabled")
+        if self.ENABLE_ATTENTION_QUEUE and not self.OPENCLAW_TOKEN:
+            errors.append("OPENCLAW_TOKEN is required when attention queue is enabled")
+        if self.ATTENTION_POLL_SECONDS < 5:
+            errors.append("ATTENTION_POLL_SECONDS must be at least 5")
         if self.OPENCLAW_THINKING not in {
             "off", "minimal", "low", "medium", "high", "xhigh", "adaptive", "max"
         }:
