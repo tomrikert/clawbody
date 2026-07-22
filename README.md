@@ -221,6 +221,9 @@ CHATTERBOX_URL=http://your-speech-host:8890/v1/audio/speech
 CHATTERBOX_VOICE=asmo
 ENABLE_WAKE_PHRASE=true
 WAKE_PHRASE=Hey Asmo
+ENABLE_ATTENTION_QUEUE=true
+ATTENTION_API_URL=http://192.168.1.238:18790
+ATTENTION_POLL_SECONDS=60
 ```
 
 The native app uses the SDK-owned robot connection and targets the local Reachy

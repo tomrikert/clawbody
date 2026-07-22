@@ -75,8 +75,8 @@ class Config:
 
     # Hourly mail attention queue. The broker is gateway-local and uses the
     # same bearer token already provisioned for OpenClaw.
-    ENABLE_ATTENTION_QUEUE: bool = field(default_factory=lambda: os.getenv("ENABLE_ATTENTION_QUEUE", "false").lower() == "true")
-    ATTENTION_API_URL: str = field(default_factory=lambda: os.getenv("ATTENTION_API_URL", ""))
+    ENABLE_ATTENTION_QUEUE: bool = field(default_factory=lambda: os.getenv("ENABLE_ATTENTION_QUEUE", "true").lower() == "true")
+    ATTENTION_API_URL: str = field(default_factory=lambda: os.getenv("ATTENTION_API_URL", "http://192.168.1.238:18790"))
     ATTENTION_POLL_SECONDS: float = field(default_factory=lambda: float(os.getenv("ATTENTION_POLL_SECONDS", "60")))
     
     # OpenClaw Gateway Configuration
