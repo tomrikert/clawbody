@@ -13,9 +13,13 @@ Based on pollen-robotics/reachy_mini_conversation_app camera worker.
 import time
 import logging
 import threading
+import math
+from io import BytesIO
 from typing import Any, List, Tuple, Optional
 
+import httpx
 import numpy as np
+from PIL import Image
 from numpy.typing import NDArray
 from scipy.spatial.transform import Rotation as R
 
@@ -36,7 +40,16 @@ class CameraWorker:
         RETURNING -- interpolating back to neutral before scanning again
     """
 
-    def __init__(self, reachy_mini: ReachyMini, head_tracker: Any = None) -> None:
+    def __init__(
+        self,
+        reachy_mini: ReachyMini,
+        head_tracker: Any = None,
+        *,
+        daemon_tracking: bool = False,
+        daemon_url: str | None = None,
+        tracking_weight: float = 0.7,
+        sound_tracking: bool = True,
+    ) -> None:
         """Initialize camera worker.
         
         Args:
@@ -45,6 +58,11 @@ class CameraWorker:
         """
         self.reachy_mini = reachy_mini
         self.head_tracker = head_tracker
+        self.daemon_tracking = daemon_tracking
+        self.daemon_url = daemon_url.rstrip("/") if daemon_url else None
+        self.tracking_weight = min(1.0, max(0.0, tracking_weight))
+        self.sound_tracking = sound_tracking
+        self._http = httpx.Client(timeout=0.5) if self.daemon_url else None
 
         # Thread-safe frame storage
         self.latest_frame: Optional[NDArray[np.uint8]] = None
@@ -58,6 +76,12 @@ class CameraWorker:
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
         ]  # x, y, z, roll, pitch, yaw
         self.face_tracking_lock = threading.Lock()
+        self.face_detected = False
+        self.speech_detected = False
+        self.doa_angle: Optional[float] = None
+        self._last_attention_poll = 0.0
+        self._sound_yaw = 0.0
+        self._ever_received_frame = False
 
         # Face tracking timing (for smooth interpolation back to neutral)
         self.last_face_detected_time: Optional[float] = None
@@ -104,6 +128,15 @@ class CameraWorker:
                 return None
             return self.latest_frame.copy()
 
+    def get_latest_jpeg(self, quality: int = 80) -> bytes | None:
+        """Encode the latest BGR camera frame for an OpenClaw image turn."""
+        frame = self.get_latest_frame()
+        if frame is None:
+            return None
+        output = BytesIO()
+        Image.fromarray(frame[:, :, ::-1]).save(output, format="JPEG", quality=quality)
+        return output.getvalue()
+
     def get_face_tracking_offsets(
         self,
     ) -> Tuple[float, float, float, float, float, float]:
@@ -128,6 +161,11 @@ class CameraWorker:
             # Start scanning immediately when re-enabled
             self._start_scanning()
         self.is_head_tracking_enabled = enabled
+        if self.daemon_tracking:
+            if enabled:
+                self.reachy_mini.start_head_tracking(weight=self.tracking_weight)
+            else:
+                self.reachy_mini.stop_head_tracking()
         logger.info("Head tracking %s", "enabled" if enabled else "disabled")
 
     def start(self) -> None:
@@ -142,7 +180,66 @@ class CameraWorker:
         self._stop_event.set()
         if self._thread is not None:
             self._thread.join(timeout=2.0)
+        if self.daemon_tracking:
+            try:
+                self.reachy_mini.stop_head_tracking()
+            except Exception:
+                logger.debug("Could not stop daemon head tracking", exc_info=True)
+        if self._http is not None:
+            self._http.close()
         logger.info("Camera worker stopped")
+
+    def get_attention_state(self) -> dict[str, Any]:
+        """Return the latest daemon face and microphone-array state."""
+        with self.face_tracking_lock:
+            return {
+                "face_detected": self.face_detected,
+                "speech_detected": self.speech_detected,
+                "doa_angle": self.doa_angle,
+            }
+
+    def _update_daemon_attention(self, current_time: float) -> None:
+        """Blend daemon face tracking with a conservative sound-direction cue."""
+        if current_time - self._last_attention_poll < 0.1:
+            return
+        self._last_attention_poll = current_time
+
+        try:
+            face = self.reachy_mini.get_tracked_face(wait=False)
+            face_detected = bool(face and face.detected)
+        except Exception:
+            face_detected = False
+
+        doa_angle: Optional[float] = None
+        speech_detected = False
+        if self.sound_tracking and self._http is not None:
+            try:
+                payload = self._http.get(f"{self.daemon_url}/api/state/doa").json()
+                if payload:
+                    doa_angle = float(payload["angle"])
+                    speech_detected = bool(payload["speech_detected"])
+            except Exception:
+                logger.debug("DoA poll failed", exc_info=True)
+
+        # Visual tracking runs inside the daemon and wins whenever a face is
+        # visible. Otherwise, softly bias the normal app pose toward speech.
+        if face_detected:
+            target_yaw = 0.0
+        elif speech_detected and doa_angle is not None:
+            target_yaw = float(np.clip((math.pi / 2) - doa_angle, -0.75, 0.75))
+        else:
+            target_yaw = 0.0
+
+        alpha = 0.35 if speech_detected and not face_detected else 0.18
+        self._sound_yaw = alpha * target_yaw + (1.0 - alpha) * self._sound_yaw
+        if abs(self._sound_yaw) < 0.01:
+            self._sound_yaw = 0.0
+
+        with self.face_tracking_lock:
+            self.face_detected = face_detected
+            self.speech_detected = speech_detected
+            self.doa_angle = doa_angle
+            self.face_tracking_offsets = [0.0, 0.0, 0.0, 0.0, 0.0, self._sound_yaw]
 
     # ------------------------------------------------------------------
     # Scanning helpers
@@ -202,9 +299,15 @@ class CameraWorker:
                 frame = self.reachy_mini.media.get_frame()
 
                 if frame is not None:
+                    if not self._ever_received_frame:
+                        self._ever_received_frame = True
+                        logger.info("First camera frame received: shape=%s", frame.shape)
                     # Thread-safe frame storage
                     with self.frame_lock:
                         self.latest_frame = frame
+
+                    if self.daemon_tracking and self.is_head_tracking_enabled:
+                        self._update_daemon_attention(current_time)
 
                     # Check if face tracking was just disabled
                     if self.previous_head_tracking_state and not self.is_head_tracking_enabled:
@@ -218,7 +321,9 @@ class CameraWorker:
                     self.previous_head_tracking_state = self.is_head_tracking_enabled
 
                     # Handle face tracking if enabled and head tracker available
-                    if self.is_head_tracking_enabled and self.head_tracker is not None:
+                    if self.daemon_tracking:
+                        pass
+                    elif self.is_head_tracking_enabled and self.head_tracker is not None:
                         self._process_face_tracking(frame, current_time, neutral_pose)
                     elif self.last_face_detected_time is not None:
                         # Handle interpolation back to neutral when tracking disabled

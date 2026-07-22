@@ -19,6 +19,9 @@ logger = logging.getLogger(__name__)
 def launch_gradio(
     gateway_url: str = "ws://localhost:18789",
     robot_name: Optional[str] = None,
+    robot_host: Optional[str] = None,
+    robot_port: Optional[int] = None,
+    robot_connection_mode: Optional[str] = None,
     enable_camera: bool = True,
     enable_openclaw: bool = True,
     enable_face_tracking: bool = True,
@@ -30,6 +33,9 @@ def launch_gradio(
     Args:
         gateway_url: OpenClaw gateway URL
         robot_name: Robot name for connection
+        robot_host: Reachy daemon hostname or IP
+        robot_port: Reachy daemon TCP port
+        robot_connection_mode: Reachy SDK connection mode
         enable_camera: Whether to enable camera
         enable_openclaw: Whether to enable OpenClaw
         enable_face_tracking: Whether to enable face tracking
@@ -57,6 +63,9 @@ def launch_gradio(
             app_instance = ClawBodyCore(
                 gateway_url=gateway_url,
                 robot_name=robot_name,
+                robot_host=robot_host,
+                robot_port=robot_port,
+                robot_connection_mode=robot_connection_mode,
                 enable_camera=enable_camera,
                 enable_openclaw=enable_openclaw,
                 enable_face_tracking=enable_face_tracking,
@@ -112,7 +121,7 @@ def launch_gradio(
         # 🤖 Reachy Mini OpenClaw
         
         Give your OpenClaw AI agent a physical presence with Reachy Mini.
-        Using OpenAI Realtime API for responsive voice conversation.
+        OpenClaw is the brain, with local STT and pluggable speech synthesis.
         """)
         
         with gr.Tab("Conversation"):
@@ -164,8 +173,10 @@ def launch_gradio(
             ### Current Configuration
             
             - **OpenClaw Gateway**: {gateway_url}
-            - **OpenAI Model**: {config.OPENAI_MODEL}
-            - **Voice**: {config.OPENAI_VOICE}
+            - **STT Endpoint**: {config.STT_BASE_URL}
+            - **STT Model**: {config.STT_MODEL}
+            - **TTS Provider**: {config.TTS_PROVIDER}
+            - **TTS Voice**: {config.CHATTERBOX_VOICE if config.TTS_PROVIDER == 'chatterbox' else config.ELEVENLABS_VOICE_ID}
             - **Camera Enabled**: {enable_camera}
             - **OpenClaw Enabled**: {enable_openclaw}
             - **Face Tracking**: {enable_face_tracking}
@@ -180,8 +191,9 @@ def launch_gradio(
             
             This application combines:
             
-            - **OpenAI Realtime API** for ultra-low-latency voice conversation
-            - **OpenClaw Gateway** for extended AI capabilities (web, calendar, smart home, etc.)
+            - **Local speech recognition** through an OpenAI-compatible endpoint
+            - **OpenClaw Gateway** as the conversational brain and tool runtime
+            - **Chatterbox or ElevenLabs** for speech synthesis
             - **Reachy Mini Robot** for physical embodiment with expressive movements
             
             ### Features
@@ -196,7 +208,7 @@ def launch_gradio(
             
             - [Reachy Mini SDK](https://github.com/pollen-robotics/reachy_mini)
             - [OpenClaw](https://github.com/openclaw/openclaw)
-            - [OpenAI Realtime API](https://platform.openai.com/docs/guides/realtime)
+            - [Chatterbox](https://github.com/resemble-ai/chatterbox)
             """)
     
     demo.launch(share=share, server_name="0.0.0.0", server_port=7860)

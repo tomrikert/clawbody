@@ -1,6 +1,6 @@
 """Prompt management for the robot assistant.
 
-Handles loading and customizing system prompts for the OpenAI Realtime session.
+Handles loading and customizing optional robot profile prompts.
 """
 
 import logging
@@ -16,7 +16,7 @@ PROMPTS_DIR = Path(__file__).parent / "prompts"
 
 
 def get_session_instructions() -> str:
-    """Get the system instructions for the OpenAI Realtime session.
+    """Get the configured robot profile instructions.
     
     Loads from custom profile if configured, otherwise uses default.
     
@@ -48,16 +48,6 @@ def get_session_instructions() -> str:
 Be conversational and use your movement capabilities to be engaging. 
 Use the camera tool when asked about your surroundings.
 Express emotions through movement to enhance communication."""
-
-
-def get_session_voice() -> str:
-    """Get the voice to use for the OpenAI Realtime session.
-    
-    Returns:
-        Voice name string
-    """
-    return config.OPENAI_VOICE
-
 
 def get_available_profiles() -> list[str]:
     """Get list of available prompt profiles.

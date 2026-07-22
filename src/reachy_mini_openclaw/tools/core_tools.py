@@ -98,6 +98,7 @@ class ToolDependencies:
     camera_worker: Optional[Any] = None
     openclaw_bridge: Optional["OpenClawBridge"] = None
     vision_manager: Optional[Any] = None  # Local vision processor (SmolVLM2)
+    motion_catalog: Optional[Any] = None
 
 
 # Tool specifications in OpenAI format
@@ -145,15 +146,14 @@ TOOL_SPECS = [
     },
     {
         "type": "function",
-        "name": "dance",
-        "description": "Perform a dance animation. Use this to express joy, celebrate, or entertain.",
+        "name": "play_dance",
+        "description": "Play an exact move from Reachy's dynamically discovered dance catalog.",
         "parameters": {
             "type": "object",
             "properties": {
                 "dance_name": {
                     "type": "string",
-                    "enum": ["happy", "excited", "wave", "nod", "shake", "bounce"],
-                    "description": "The dance to perform"
+                    "description": "Exact dance catalog name"
                 }
             },
             "required": ["dance_name"]
@@ -161,19 +161,31 @@ TOOL_SPECS = [
     },
     {
         "type": "function",
-        "name": "emotion",
-        "description": "Express an emotion through movement. Use this to show reactions and feelings.",
+        "name": "play_emotion",
+        "description": "Play an emotion by exact move name, semantic family, or common alias.",
         "parameters": {
             "type": "object",
             "properties": {
                 "emotion_name": {
                     "type": "string",
-                    "enum": ["happy", "sad", "surprised", "curious", "thinking", "confused", "excited"],
-                    "description": "The emotion to express"
+                    "description": "Exact move (for example proud3), family (proud), or alias (victory)"
                 }
             },
             "required": ["emotion_name"]
         }
+    },
+    {
+        "type": "function",
+        "name": "list_moves",
+        "description": "List or search the live Reachy emotion and dance catalogs.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "enum": ["emotion", "dance"]},
+                "query": {"type": "string", "description": "Optional case-insensitive name fragment"},
+            },
+            "required": [],
+        },
     },
     {
         "type": "function",
@@ -231,8 +243,9 @@ async def dispatch_tool_call(
         "look": _handle_look,
         "camera": _handle_camera,
         "face_tracking": _handle_face_tracking,
-        "dance": _handle_dance,
-        "emotion": _handle_emotion,
+        "play_dance": _handle_dance,
+        "play_emotion": _handle_emotion,
+        "list_moves": _handle_list_moves,
         "stop_moves": _handle_stop_moves,
         "idle": _handle_idle,
     }
@@ -377,8 +390,8 @@ async def _handle_face_tracking(args: dict, deps: ToolDependencies) -> dict:
         return {"error": "Camera not available for face tracking"}
     
     try:
-        # Check if head tracker is available
-        if deps.camera_worker.head_tracker is None:
+        # A detector can live in this process or in Reachy's daemon.
+        if deps.camera_worker.head_tracker is None and not deps.camera_worker.daemon_tracking:
             return {"error": "Face tracking not available - no head tracker initialized"}
         
         deps.camera_worker.set_head_tracking_enabled(enabled)
@@ -389,62 +402,53 @@ async def _handle_face_tracking(args: dict, deps: ToolDependencies) -> dict:
 
 async def _handle_dance(args: dict, deps: ToolDependencies) -> dict:
     """Handle dance tool."""
-    dance_name = args.get("dance_name", "happy")
-    
+    dance_name = args.get("dance_name", "")
     try:
-        # Try to use dance library if available
-        from reachy_mini_dances_library import dances
-        
-        if hasattr(dances, dance_name):
-            dance_class = getattr(dances, dance_name)
-            dance_move = dance_class()
-            deps.movement_manager.queue_move(dance_move)
-            return {"status": "success", "dance": dance_name}
-        else:
-            # Fallback to simple head movement
-            return await _handle_emotion({"emotion_name": dance_name}, deps)
-    except ImportError:
-        # No dance library, use emotion as fallback
-        return await _handle_emotion({"emotion_name": dance_name}, deps)
+        if deps.motion_catalog is None:
+            return {"error": "Motion catalog is unavailable"}
+        deps.movement_manager.queue_move(deps.motion_catalog.get("dance", dance_name))
+        return {"status": "success", "dance": dance_name}
     except Exception as e:
         return {"error": str(e)}
 
 
 async def _handle_emotion(args: dict, deps: ToolDependencies) -> dict:
     """Handle emotion expression."""
-    from reachy_mini_openclaw.moves import HeadLookMove
-    
-    emotion_name = args.get("emotion_name", "happy")
-    
-    # Map emotions to simple head movements
-    emotion_sequences = {
-        "happy": ["up", "front"],
-        "sad": ["down"],
-        "surprised": ["up", "front"],
-        "curious": ["right", "left", "front"],
-        "thinking": ["up", "left"],
-        "confused": ["left", "right", "front"],
-        "excited": ["up", "down", "up", "front"],
-    }
-    
-    sequence = emotion_sequences.get(emotion_name, ["front"])
-    
+    emotion_name = args.get("emotion_name", "")
     try:
-        for direction in sequence:
-            _, current_ant = deps.robot.get_current_joint_positions()
-            current_head = deps.robot.get_current_head_pose()
-            
-            move = HeadLookMove(
-                direction=direction,
-                start_pose=current_head,
-                start_antennas=tuple(current_ant),
-                duration=0.5,
-            )
-            deps.movement_manager.queue_move(move)
-        
-        return {"status": "success", "emotion": emotion_name}
+        if deps.motion_catalog is None:
+            return {"error": "Motion catalog is unavailable"}
+        resolved = deps.motion_catalog.resolve_emotion(emotion_name)
+        if resolved is None:
+            return {"error": f"Unknown emotion intent: {emotion_name}"}
+        deps.movement_manager.queue_move(deps.motion_catalog.get("emotion", resolved))
+        return {"status": "success", "emotion": resolved, "requested": emotion_name}
     except Exception as e:
         return {"error": str(e)}
+
+
+async def _handle_list_moves(args: dict, deps: ToolDependencies) -> dict:
+    if deps.motion_catalog is None:
+        return {"error": "Motion catalog is unavailable"}
+    kind = args.get("kind")
+    query = args.get("query", "")
+    if query:
+        return {"status": "success", "moves": deps.motion_catalog.search(query, kind)}
+    if kind:
+        result = {"status": "success", "moves": {kind: deps.motion_catalog.list(kind)}}
+        if kind == "emotion":
+            result["emotion_families"] = deps.motion_catalog.emotion_map()
+            result["unmapped_emotions"] = deps.motion_catalog.unmapped_emotions()
+        return result
+    return {
+        "status": "success",
+        "moves": {
+            "emotion": deps.motion_catalog.list("emotion"),
+            "dance": deps.motion_catalog.list("dance"),
+        },
+        "emotion_families": deps.motion_catalog.emotion_map(),
+        "unmapped_emotions": deps.motion_catalog.unmapped_emotions(),
+    }
 
 
 async def _handle_stop_moves(args: dict, deps: ToolDependencies) -> dict:

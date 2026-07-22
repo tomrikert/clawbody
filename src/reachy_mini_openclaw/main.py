@@ -1,8 +1,8 @@
 """ClawBody - Give your OpenClaw AI agent a physical robot body.
 
 This module provides the main application that connects:
-- OpenAI Realtime API for voice I/O (speech recognition + TTS)
-- OpenClaw Gateway for AI intelligence (Clawson's brain)
+- Local/OpenAI-compatible STT and provider-based TTS
+- OpenClaw Gateway as the sole conversational brain
 - Reachy Mini robot for physical embodiment
 
 Usage:
@@ -20,6 +20,7 @@ import os
 import sys
 import time
 import asyncio
+import base64
 import logging
 import argparse
 import threading
@@ -76,7 +77,7 @@ Examples:
     clawbody --robot-name my-reachy
 
     # Use different OpenClaw gateway
-    clawbody --gateway-url http://192.168.1.100:18790
+    clawbody --gateway-url http://openclaw-host.local:18789
         """
     )
     
@@ -94,6 +95,24 @@ Examples:
         "--robot-name",
         type=str,
         help="Robot name for connection (default: auto-discover)"
+    )
+    parser.add_argument(
+        "--robot-host",
+        type=str,
+        default=os.getenv("ROBOT_HOST", "reachy-mini.local"),
+        help="Reachy daemon hostname or IP",
+    )
+    parser.add_argument(
+        "--robot-port",
+        type=int,
+        default=int(os.getenv("ROBOT_PORT", "8000")),
+        help="Reachy daemon TCP port",
+    )
+    parser.add_argument(
+        "--robot-connection-mode",
+        choices=["auto", "localhost_only", "network"],
+        default=os.getenv("ROBOT_CONNECTION_MODE", "auto"),
+        help="Reachy SDK connection mode",
     )
     parser.add_argument(
         "--gateway-url",
@@ -135,8 +154,8 @@ class ClawBodyCore:
     
     This class orchestrates all components:
     - Reachy Mini robot connection and movement control
-    - OpenAI Realtime API for voice I/O
-    - OpenClaw gateway bridge for AI intelligence
+    - Provider-based speech recognition and synthesis
+    - OpenClaw gateway bridge for conversational intelligence
     - Audio input/output loops
     """
     
@@ -144,6 +163,9 @@ class ClawBodyCore:
         self,
         gateway_url: str = "ws://localhost:18789",
         robot_name: Optional[str] = None,
+        robot_host: Optional[str] = None,
+        robot_port: Optional[int] = None,
+        robot_connection_mode: Optional[str] = None,
         enable_camera: bool = True,
         enable_openclaw: bool = True,
         robot: Optional["ReachyMini"] = None,
@@ -154,6 +176,9 @@ class ClawBodyCore:
         Args:
             gateway_url: OpenClaw gateway URL
             robot_name: Optional robot name for connection
+            robot_host: Reachy daemon hostname or IP
+            robot_port: Reachy daemon TCP port
+            robot_connection_mode: Reachy SDK connection mode
             enable_camera: Whether to enable camera functionality
             enable_openclaw: Whether to enable OpenClaw integration
             robot: Optional pre-initialized robot (for app framework)
@@ -164,10 +189,18 @@ class ClawBodyCore:
         from reachy_mini_openclaw.moves import MovementManager
         from reachy_mini_openclaw.audio.head_wobbler import HeadWobbler
         from reachy_mini_openclaw.openclaw_bridge import OpenClawBridge
+        from reachy_mini_openclaw.motion_catalog import MotionCatalog
         from reachy_mini_openclaw.tools.core_tools import ToolDependencies
-        from reachy_mini_openclaw.openai_realtime import OpenAIRealtimeHandler
+        from reachy_mini_openclaw.audio.conversation import ConversationHandler, EnergyVAD
+        from reachy_mini_openclaw.audio.providers import (
+            ChatterboxTTS,
+            ElevenLabsTTS,
+            FallbackTTS,
+            OpenAICompatibleSTT,
+        )
         
         self.gateway_url = gateway_url
+        self.audio_output_gain = config.AUDIO_OUTPUT_GAIN
         self._external_stop_event = external_stop_event
         self._owns_robot = robot is None
         
@@ -187,6 +220,9 @@ class ClawBodyCore:
             robot_kwargs = {}
             if robot_name:
                 robot_kwargs["robot_name"] = robot_name
+            robot_kwargs["host"] = robot_host or config.ROBOT_HOST
+            robot_kwargs["port"] = robot_port or config.ROBOT_PORT
+            robot_kwargs["connection_mode"] = robot_connection_mode or config.ROBOT_CONNECTION_MODE
                 
             try:
                 self.robot = ReachyMini(**robot_kwargs)
@@ -206,6 +242,13 @@ class ClawBodyCore:
         self.head_wobbler = HeadWobbler(
             set_speech_offsets=self.movement_manager.set_speech_offsets
         )
+        logger.info("Loading Reachy emotion and dance catalogs...")
+        self.motion_catalog = MotionCatalog()
+        logger.info(
+            "Loaded %d emotion moves and %d dance moves",
+            len(self.motion_catalog.list("emotion")),
+            len(self.motion_catalog.list("dance")),
+        )
         
         # Initialize OpenClaw bridge
         self.openclaw_bridge = None
@@ -224,19 +267,25 @@ class ClawBodyCore:
         if enable_camera:
             logger.info("Initializing camera worker...")
             from reachy_mini_openclaw.camera_worker import CameraWorker
+
+            daemon_tracking = config.ENABLE_FACE_TRACKING and config.HEAD_TRACKER_TYPE == "daemon"
             
             # Initialize head tracker for local face tracking
-            if config.ENABLE_FACE_TRACKING:
+            if config.ENABLE_FACE_TRACKING and not daemon_tracking:
                 self.head_tracker = self._initialize_head_tracker(config.HEAD_TRACKER_TYPE)
             
             # Initialize camera worker with head tracker
             self.camera_worker = CameraWorker(
                 reachy_mini=self.robot,
                 head_tracker=self.head_tracker,
+                daemon_tracking=daemon_tracking,
+                daemon_url=f"http://{robot_host or config.ROBOT_HOST}:{robot_port or config.ROBOT_PORT}",
+                tracking_weight=config.FACE_TRACKING_WEIGHT,
+                sound_tracking=config.ENABLE_SOUND_TRACKING,
             )
             
             # Enable/disable head tracking based on whether we have a tracker
-            self.camera_worker.set_head_tracking_enabled(self.head_tracker is not None)
+            self.camera_worker.set_head_tracking_enabled(daemon_tracking or self.head_tracker is not None)
             
             # Initialize local vision processor if enabled
             if config.ENABLE_LOCAL_VISION:
@@ -250,12 +299,58 @@ class ClawBodyCore:
             camera_worker=self.camera_worker,
             openclaw_bridge=self.openclaw_bridge,
             vision_manager=self.vision_manager,
+            motion_catalog=self.motion_catalog,
         )
         
-        # Initialize OpenAI Realtime handler with OpenClaw bridge
-        self.handler = OpenAIRealtimeHandler(
+        if self.openclaw_bridge is None:
+            raise ValueError("The conversational pipeline requires OpenClaw")
+
+        stt = OpenAICompatibleSTT(
+            config.STT_BASE_URL,
+            config.STT_MODEL,
+            api_key=config.STT_API_KEY,
+            language=config.STT_LANGUAGE,
+            timeout=config.STT_TIMEOUT_SECONDS,
+        )
+        chatterbox = ChatterboxTTS(
+            config.CHATTERBOX_URL,
+            voice=config.CHATTERBOX_VOICE,
+            api_key=config.CHATTERBOX_API_KEY,
+            sample_rate=config.CHATTERBOX_SAMPLE_RATE,
+            timeout=config.TTS_TIMEOUT_SECONDS,
+        )
+        elevenlabs = None
+        if config.ELEVENLABS_API_KEY and config.ELEVENLABS_VOICE_ID:
+            elevenlabs = ElevenLabsTTS(
+                config.ELEVENLABS_API_KEY,
+                config.ELEVENLABS_VOICE_ID,
+                model_id=config.ELEVENLABS_MODEL_ID,
+                base_url=config.ELEVENLABS_BASE_URL,
+                timeout=config.TTS_TIMEOUT_SECONDS,
+            )
+        if config.TTS_PROVIDER == "elevenlabs":
+            assert elevenlabs is not None
+            tts = elevenlabs
+        elif elevenlabs is not None:
+            tts = FallbackTTS(chatterbox, elevenlabs)
+        else:
+            tts = chatterbox
+
+        self.handler = ConversationHandler(
+            stt=stt,
+            tts=tts,
             deps=self.deps,
             openclaw_bridge=self.openclaw_bridge,
+            vad=EnergyVAD(
+                rms_threshold=config.VAD_RMS_THRESHOLD,
+                activation_ms=config.VAD_ACTIVATION_MS,
+                prefix_ms=config.VAD_PREFIX_MS,
+                silence_ms=config.VAD_SILENCE_MS,
+                min_speech_ms=config.VAD_MIN_SPEECH_MS,
+                max_speech_seconds=config.VAD_MAX_SPEECH_SECONDS,
+            ),
+            attention_provider=self.camera_worker,
+            require_hardware_speech=config.VAD_REQUIRE_HARDWARE_SPEECH,
         )
         
         # State
@@ -365,20 +460,30 @@ class ClawBodyCore:
             
     async def play_loop(self) -> None:
         """Play audio from handler through robot speakers."""
+        from reachy_mini_openclaw.audio.playback import apply_output_gain
+
         output_sr = self.robot.media.get_output_audio_samplerate()
-        logger.info("Playing at %d Hz", output_sr)
+        logger.info("Playing at %d Hz with %.2fx software gain", output_sr, self.audio_output_gain)
         
         while not self._should_stop():
             output = await self.handler.emit()
             if output is not None:
                 if isinstance(output, tuple):
                     input_sr, audio_data = output
+
+                    # Feed the speech animator at playback time, not synthesis
+                    # time, so movement stays synchronized with the speaker.
+                    self.head_wobbler.feed(
+                        base64.b64encode(audio_data.astype("int16").tobytes()).decode("ascii")
+                    )
                     
-                    # Convert to float32 and normalize (OpenAI sends int16)
+                    # Convert provider PCM16 to normalized float32.
                     audio_data = audio_data.flatten().astype("float32") / 32768.0
                     
-                    # Reduce volume to prevent distortion (0.5 = 50% volume)
-                    audio_data = audio_data * 0.5
+                    # The old donor project attenuated every response to 50%,
+                    # independently of Reachy's console volume. Preserve the
+                    # synthesized level by default and permit controlled boost.
+                    audio_data = apply_output_gain(audio_data, self.audio_output_gain)
                     
                     # Resample if needed
                     if input_sr != output_sr:
@@ -387,7 +492,7 @@ class ClawBodyCore:
                         audio_data = resample(audio_data, num_samples).astype("float32")
                         
                     self.robot.media.push_audio_sample(audio_data)
-                # else: it's an AdditionalOutputs (transcript) - handle in UI mode
+                # Otherwise it is a transcript event for a future UI consumer.
                 
             await asyncio.sleep(0.01)
             
@@ -446,8 +551,8 @@ class ClawBodyCore:
         
         logger.info("Ready! Speak to me...")
         
-        # Start OpenAI handler in background
-        handler_task = asyncio.create_task(self.handler.start_up(), name="openai-handler")
+        # Start the provider-based speech pipeline in the background.
+        handler_task = asyncio.create_task(self.handler.start_up(), name="conversation-handler")
         
         # Start audio loops
         self._tasks = [
@@ -567,6 +672,9 @@ def main() -> None:
         launch_gradio(
             gateway_url=args.gateway_url,
             robot_name=args.robot_name,
+            robot_host=args.robot_host,
+            robot_port=args.robot_port,
+            robot_connection_mode=args.robot_connection_mode,
             enable_camera=not args.no_camera,
             enable_openclaw=not args.no_openclaw,
         )
@@ -575,6 +683,9 @@ def main() -> None:
         app = ClawBodyCore(
             gateway_url=args.gateway_url,
             robot_name=args.robot_name,
+            robot_host=args.robot_host,
+            robot_port=args.robot_port,
+            robot_connection_mode=args.robot_connection_mode,
             enable_camera=not args.no_camera,
             enable_openclaw=not args.no_openclaw,
         )

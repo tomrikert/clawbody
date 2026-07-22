@@ -1,0 +1,28 @@
+[project]
+name = "asmo-voice-stack"
+version = "0.1.0"
+description = "Always-hot local STT and voice-cloned TTS for ClawBody"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+  "chatterbox-tts>=0.1.6",
+  "fastapi>=0.116.0",
+  "faster-whisper>=1.2.0",
+  "numpy<2",
+  "python-multipart>=0.0.20",
+  "setuptools<81",
+  "soundfile>=0.13.1",
+  "uvicorn[standard]>=0.35.0",
+]
+
+[dependency-groups]
+dev = [
+  "httpx>=0.28.1",
+  "pytest>=8.4.0",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

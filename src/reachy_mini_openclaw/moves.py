@@ -263,6 +263,7 @@ class MovementManager:
         self._thread: Optional[threading.Thread] = None
         self._is_listening = False
         self._breathing_active = False
+        self._tracking_suspended_for_move = False
         
         # Last commanded pose for smooth transitions
         self._last_commanded_pose = clone_pose(self.state.last_primary_pose)
@@ -402,6 +403,7 @@ class MovementManager:
                 logger.debug("Queued move, queue size: %d", len(self.move_queue))
         elif cmd == "clear_queue":
             self.move_queue.clear()
+            self._restore_tracking_after_move()
             self.state.current_move = None
             self.state.move_start_time = None
             self._breathing_active = False
@@ -440,15 +442,45 @@ class MovementManager:
         if self.state.current_move is not None and self.state.move_start_time is not None:
             elapsed = current_time - self.state.move_start_time
             if elapsed >= self.state.current_move.duration:
+                completed = self.state.current_move
                 self.state.current_move = None
                 self.state.move_start_time = None
+                if getattr(completed, "exclusive_tracking", False):
+                    self._restore_tracking_after_move()
+                    logger.info(
+                        "Completed expressive move: %s",
+                        getattr(completed, "name", type(completed).__name__),
+                    )
                 
         # Start next move if available
         if self.state.current_move is None and self.move_queue:
             self.state.current_move = self.move_queue.popleft()
             self.state.move_start_time = current_time
             self._breathing_active = isinstance(self.state.current_move, BreathingMove)
-            logger.debug("Starting move with duration: %s", self.state.current_move.duration)
+            if getattr(self.state.current_move, "exclusive_tracking", False):
+                self._suspend_tracking_for_move()
+                logger.info(
+                    "Starting expressive move: %s (%.2fs)",
+                    getattr(self.state.current_move, "name", type(self.state.current_move).__name__),
+                    self.state.current_move.duration,
+                )
+            else:
+                logger.debug("Starting move with duration: %s", self.state.current_move.duration)
+
+    def _suspend_tracking_for_move(self) -> None:
+        """Give recorded choreography exclusive control of the robot body."""
+        if self.camera_worker is None or self._tracking_suspended_for_move:
+            return
+        if self.camera_worker.is_head_tracking_enabled:
+            self.camera_worker.set_head_tracking_enabled(False)
+            self._tracking_suspended_for_move = True
+
+    def _restore_tracking_after_move(self) -> None:
+        """Resume autonomous attention after expressive choreography."""
+        if self.camera_worker is None or not self._tracking_suspended_for_move:
+            return
+        self.camera_worker.set_head_tracking_enabled(True)
+        self._tracking_suspended_for_move = False
             
     def _manage_breathing(self, current_time: float) -> None:
         """Start breathing when idle."""
@@ -508,6 +540,15 @@ class MovementManager:
         
     def _get_secondary_pose(self) -> FullBodyPose:
         """Get secondary offsets (speech + face tracking + thinking)."""
+        # Recorded emotions and dances are authored as complete body poses.
+        # Speech wobble, sound direction, and daemon face tracking all distort
+        # them, so choreography receives exclusive control for its duration.
+        if self.state.current_move is not None and getattr(
+            self.state.current_move, "exclusive_tracking", False
+        ):
+            neutral = create_head_pose(0, 0, 0, 0, 0, 0, degrees=True)
+            return (neutral, (0.0, 0.0), 0.0)
+
         offsets = [
             self.state.speech_offsets[i]
             + self.state.face_tracking_offsets[i]
